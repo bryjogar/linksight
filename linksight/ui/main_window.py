@@ -220,8 +220,8 @@ class MainWindow(QMainWindow):
             self.controller.source = None
         self._start()
         # refresh LAN info for the new adapter
-        nic = self.nic_widget.model.nic_at(self.nic_widget.table.currentRow()) \
-            if self.nic_widget.table.currentRow() >= 0 else None
+        row = self.nic_widget.table.currentIndex().row()
+        nic = self.nic_widget.model.nic_at(row) if row >= 0 else None
         if nic is not None:
             self.lan_widget.set_interface(nic.name, nic.mac)
         elif self.iface_combo.currentData():
