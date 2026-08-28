@@ -1,6 +1,6 @@
 """Npcap detection and install help (Windows only).
 
-On Windows, NetProbe needs Npcap for packet capture. We detect it up front,
+On Windows, LinkSight needs Npcap for packet capture. We detect it up front,
 and when it's missing offer to download + launch the official installer
 (rather than failing silently at sniff time).
 

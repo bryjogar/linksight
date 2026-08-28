@@ -2,7 +2,8 @@
 
 from PySide6.QtCore import QEvent
 
-from netprobe.ui.update_event import UpdateAvailableEvent
+from linksight.ui.update_event import UpdateAvailableEvent
+
 
 
 def test_event_constructs_with_enum_type():

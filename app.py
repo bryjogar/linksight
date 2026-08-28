@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NetProbe entry point.
+"""LinkSight entry point.
 
 Usage:
     python app.py               # live capture
@@ -13,9 +13,9 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from netprobe.ui.theme import apply
-from netprobe.ui.controller import AppController
-from netprobe.ui.main_window import MainWindow
+from linksight.ui.theme import apply
+from linksight.ui.controller import AppController
+from linksight.ui.main_window import MainWindow
 
 
 def _set_windows_app_id() -> None:
@@ -26,20 +26,20 @@ def _set_windows_app_id() -> None:
     try:
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "NetProbe.NeighborDiscovery.1"
+            "LinkSight.NeighborDiscovery.1"
         )
     except Exception:
         pass
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="netprobe", description="LLDP/CDP neighbor discovery")
+    parser = argparse.ArgumentParser(prog="linksight", description="LLDP/CDP neighbor discovery")
     parser.add_argument("--demo", action="store_true", help="replay simulated frames (no capture privileges needed)")
     args = parser.parse_args(argv)
 
     _set_windows_app_id()
     app = QApplication(sys.argv[:1])
-    app.setApplicationName("NetProbe")
+    app.setApplicationName("LinkSight")
     apply(app)
 
     controller = AppController()
@@ -60,3 +60,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

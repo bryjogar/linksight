@@ -1,6 +1,6 @@
 """Packet sniffing via Scapy, with graceful degradation.
 
-NetProbe only needs LLDP (EtherType 0x88CC) and CDP (dst 01:00:0c:cc:cc:cc)
+LinkSight only needs LLDP (EtherType 0x88CC) and CDP (dst 01:00:0c:cc:cc:cc)
 frames. We use a BPF filter so the kernel drops everything else — cheap even
 on busy networks.
 
@@ -41,7 +41,7 @@ class Sniffer:
     ):
         self.interface = interface
         self.on_device = on_device
-        self.on_error = on_error or (lambda msg: print(f"[netprobe] {msg}"))
+        self.on_error = on_error or (lambda msg: print(f"[linksight] {msg}"))
         self.on_dhcp = on_dhcp
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -50,8 +50,9 @@ class Sniffer:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="netprobe-sniffer", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="linksight-sniffer", daemon=True)
         self._thread.start()
+
 
     def stop(self) -> None:
         self._stop.set()

@@ -1,7 +1,7 @@
 """Demo replay mode — feeds realistic LLDP/CDP frames on a timer.
 
-Lets you see the full UI live without a switch: when NetProbe can't capture
-(this container has no CAP_NET_RAW), run with --demo and it simulates a small
+Lets you see the full UI live without a switch: when LinkSight can't capture
+(e.g. running in an unprivileged container), run with --demo and it simulates a small
 network appearing over time.
 """
 
@@ -73,8 +73,9 @@ class DemoSource:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="netprobe-demo", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="linksight-demo", daemon=True)
         self._thread.start()
+
 
     def stop(self) -> None:
         self._stop.set()

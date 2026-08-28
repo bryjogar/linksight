@@ -1,13 +1,12 @@
-"""Application-wide stylesheet — matches the wifi-explorer house style.
+"""Application-wide stylesheet for LinkSight.
 
-Palette, radii, and accent are deliberately identical to WiFi Explorer so
-NetProbe reads as part of the same family of tools. Clean engineering blue
-(#3b82f6), not blurple. Restrained 6-8px radii, no bubble buttons.
+Dark, engineering-focused UI with clean blue (#3b82f6) accent.
+Restrained 6-8px radii, dense layout.
 """
 
 from __future__ import annotations
 
-# Palette (shared with wifi-explorer)
+# Palette
 BG = "#0f1117"
 BG_RAISED = "#161822"
 BG_PANEL = "#13151f"
@@ -16,7 +15,8 @@ BG_INPUT = "#1a1d2e"
 FG = "#e0e0e0"
 FG_DIM = "#a0a0a0"
 FG_FAINT = "#808080"
-ACCENT = "#3b82f6"          # engineering blue (wifi-explorer accent)
+ACCENT = "#3b82f6"          # engineering blue
+
 ACCENT_HOVER = "#2563eb"
 ACCENT_PRESSED = "#1d4ed8"
 BORDER = "#252836"

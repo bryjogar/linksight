@@ -1,11 +1,11 @@
-"""Generate NetProbe app icon (.ico + .icns source PNGs).
+"""Generate LinkSight app icon (.ico + .icns source PNGs).
 
-House style: engineered, dense, dark #13151f panel with #3b82f6 accent.
+Style: engineered, dense, dark #13151f panel with #3b82f6 accent.
 Motif: a center node with four connected neighbors — LLDP/CDP neighbor
 discovery as a clean topology glyph.
 
 Usage: python tools/make_icon.py
-Output: netprobe_icon.png (1024), netprobe.ico (multi-size), netprobe.icns (mac)
+Output: linksight_icon.png (1024), linksight.ico (multi-size), linksight.icns (mac)
 """
 
 from __future__ import annotations
@@ -84,14 +84,14 @@ def main() -> None:
     sizes = [16, 24, 32, 48, 64, 128, 256, 512, 1024]
     imgs = {sz: render(sz) for sz in sizes}
 
-    png_path = ROOT / "netprobe_icon.png"
+    png_path = ROOT / "linksight_icon.png"
     imgs[1024].save(str(png_path))
     print("PNG:", png_path)
 
     # .ico — write multi-size via Pillow if available (Qt can't write ico)
     try:
         from PIL import Image
-        ico = ROOT / "netprobe.ico"
+        ico = ROOT / "linksight.ico"
         pil_imgs = []
         for sz in (16, 24, 32, 48, 64, 128, 256):
             qimg = imgs[sz]
@@ -106,7 +106,7 @@ def main() -> None:
     # .icns — build from PNGs via Pillow
     try:
         from PIL import Image
-        icns = ROOT / "netprobe.icns"
+        icns = ROOT / "linksight.icns"
         pil_1024 = Image.open(str(png_path)).convert("RGBA")
         # ICNS family: 512@2x (1024), 512, 256@2x (512), 256, 128@2x (256), 128
         icns_sizes = [(1024, 512, "ic10"), (512, 512, "ic09"), (512, 256, "ic08"),
@@ -134,3 +134,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

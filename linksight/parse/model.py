@@ -1,4 +1,4 @@
-"""Core data model for NetProbe."""
+"""Core data model for LinkSight."""
 
 from __future__ import annotations
 

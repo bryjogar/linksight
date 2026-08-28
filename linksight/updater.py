@@ -1,4 +1,4 @@
-"""Update checker — polls GitHub for newer commits (same pattern as wifi-explorer)."""
+"""Update checker — polls GitHub for newer commits."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def check_for_updates(current_sha: str) -> UpdateInfo | None:
 
     url = (
         "https://api.github.com/repos/bryjogar/"
-        "self-hosted-and-hyper-personal/commits/main"
+        "linksight/commits/main"
     )
     try:
         ctx = ssl.create_default_context()
@@ -35,7 +35,7 @@ def check_for_updates(current_sha: str) -> UpdateInfo | None:
             url,
             headers={
                 "Accept": "application/vnd.github.v3+json",
-                "User-Agent": "NetProbe-UpdateCheck/0.1",
+                "User-Agent": "LinkSight",
             },
         )
         with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
@@ -49,7 +49,8 @@ def check_for_updates(current_sha: str) -> UpdateInfo | None:
             latest_sha=latest[:7],
             current_sha=current_sha[:7],
             message=data["commit"]["message"].split("\n")[0][:80],
-            url="https://github.com/bryjogar/self-hosted-and-hyper-personal/releases/latest",
+            url="https://github.com/bryjogar/linksight/releases/latest",
         )
     except Exception:
         return None
+

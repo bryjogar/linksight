@@ -1,6 +1,7 @@
 """Tests for the hexdump helper (pure module — no Qt import needed)."""
 
-from netprobe.util import hexdump
+from linksight.util import hexdump
+
 
 
 def test_hexdump_short():

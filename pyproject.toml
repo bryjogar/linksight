@@ -1,5 +1,5 @@
 [project]
-name = "netprobe"
+name = "linksight"
 version = "0.1.0"
 description = "Passive LLDP/CDP neighbor discovery — a desktop alternative to the Netool.io probe"
 requires-python = ">=3.11"
@@ -16,7 +16,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["netprobe*"]
+include = ["linksight*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+

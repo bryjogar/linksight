@@ -1,6 +1,6 @@
 """Tests for interface discovery."""
 
-from netprobe.capture.interfaces import (
+from linksight.capture.interfaces import (
     list_interfaces, NetInterface, preferred_interface,
 )
 
@@ -34,7 +34,8 @@ def _nic(name, ips=(), desc="", loopback=False):
 
 
 def test_prefers_ethernet_over_bluetooth():
-    """The Bryan-laptop scenario: Bluetooth + Wi-Fi + USB ethernet."""
+    """Multi-NIC scenario: Bluetooth + Wi-Fi + USB ethernet."""
+
     ifaces = [
         _nic("Bluetooth Network Connection", desc="Bluetooth Device (Personal Area Network)"),
         _nic("Wi-Fi", ips=["192.168.1.5"], desc="Intel(R) Wi-Fi 6 AX201"),

@@ -1,4 +1,4 @@
-"""MAC vendor lookup via IEEE OUI database (same design as wifi-explorer).
+"""MAC vendor lookup via IEEE OUI database.
 
 On first use, downloads the IEEE OUI list and caches it in a small SQLite DB.
 Falls back gracefully (offline, first-run failure) to returning "".
@@ -12,7 +12,7 @@ import sqlite3
 import urllib.request
 from pathlib import Path
 
-_CACHE_DIR = Path(os.path.expanduser("~")) / ".netprobe"
+_CACHE_DIR = Path(os.path.expanduser("~")) / ".linksight"
 _CACHE_DB = _CACHE_DIR / "oui.db"
 _IEEE_OUI_URL = "https://standards-oui.ieee.org/oui/oui.txt"
 
@@ -39,7 +39,8 @@ def _download_oui_database() -> bool:
     global _download_attempted
     _download_attempted = True
     try:
-        req = urllib.request.Request(_IEEE_OUI_URL, headers={"User-Agent": "NetProbe/0.1"})
+        req = urllib.request.Request(_IEEE_OUI_URL, headers={"User-Agent": "LinkSight/0.1"})
+
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = resp.read().decode("utf-8", errors="replace")
     except Exception:

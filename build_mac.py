@@ -4,7 +4,7 @@ Usage (on a Mac):
     pip install -r requirements.txt
     python build_mac.py
 
-Output:  dist/NetProbe.app  (self-contained bundle)
+Output:  dist/LinkSight.app  (self-contained bundle)
          Zip it and it runs from anywhere — Downloads, USB stick, a folder
          on a shared drive. No install needed.
 
@@ -19,7 +19,7 @@ Gatekeeper / signing:
       without ceremony.  When you give it to someone else, macOS will block
       the first launch:  "cannot be opened because the developer cannot be
       verified."  The user right-clicks → Open → Open (once), then it runs.
-      Acceptable for friends/family; bad for a real product.
+      Acceptable for internal/ad-hoc use; not for a commercial product.
     - Real distribution:  sign with a Developer ID + notarize with Apple
       (requires an Apple Developer account, $99/year).  Then it installs
       with no warnings.  This script does NOT do that — see the signing
@@ -36,7 +36,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 
 
 def embed_version():
-    """Write current git SHA to netprobe/version.py so it's bundled."""
+    """Write current git SHA to linksight/version.py so it's bundled."""
     sha = "unknown"
     try:
         result = subprocess.run(
@@ -49,7 +49,7 @@ def embed_version():
     except Exception:
         pass
 
-    version_file = PROJECT_DIR / "netprobe" / "version.py"
+    version_file = PROJECT_DIR / "linksight" / "version.py"
     version_file.write_text(
         f'# Auto-generated at build time\n'
         f'__version_sha__ = "{sha}"\n'
@@ -61,7 +61,7 @@ def embed_version():
 
 def main():
     print("=" * 60)
-    print("NetProbe - macOS portable build")
+    print("LinkSight - macOS portable build")
     print(f"  Platform: {sys.platform}")
     print(f"  Python:   {sys.version.split()[0]}")
     print("=" * 60)
@@ -70,7 +70,7 @@ def main():
         print("ERROR: this script must run on macOS (PyInstaller can't cross-build).")
         sys.exit(1)
 
-    spec = PROJECT_DIR / "netprobe-mac.spec"
+    spec = PROJECT_DIR / "linksight-mac.spec"
     if not spec.exists():
         print(f"ERROR: {spec} not found")
         sys.exit(1)
@@ -93,19 +93,19 @@ def main():
         print("\nBuild FAILED. See output above for errors.")
         sys.exit(1)
 
-    app_dir = PROJECT_DIR / "dist" / "NetProbe.app"
+    app_dir = PROJECT_DIR / "dist" / "LinkSight.app"
     if not app_dir.exists():
-        print("\nERROR: expected NetProbe.app but it wasn't produced.")
+        print("\nERROR: expected LinkSight.app but it wasn't produced.")
         sys.exit(1)
 
     size_mb = sum(f.stat().st_size for f in app_dir.rglob('*') if f.is_file()) / (1024 * 1024)
-    zip_path = PROJECT_DIR / "dist" / "NetProbe-mac.zip"
+    zip_path = PROJECT_DIR / "dist" / "LinkSight-mac.zip"
     print(f"\nDONE - {size_mb:.0f} MB bundle")
     print(f"  {app_dir}")
     print("  Creating distributable zip...")
-    shutil.make_archive(str(zip_path.with_suffix("")), "zip", PROJECT_DIR / "dist", "NetProbe.app")
+    shutil.make_archive(str(zip_path.with_suffix("")), "zip", PROJECT_DIR / "dist", "LinkSight.app")
     print(f"  {zip_path}")
-    print("\nDistribute the zip. Recipient unzips and drags NetProbe.app to")
+    print("\nDistribute the zip. Recipient unzips and drags LinkSight.app to")
     print("Applications, or runs it from the unzipped folder.")
 
 
@@ -115,13 +115,13 @@ def main():
 #   # 1. Sign the .app with your Developer ID Application certificate
 #   codesign --force --deep --options runtime \
 #     --sign "Developer ID Application: Your Name (TEAMID)" \
-#     dist/NetProbe.app
+#     dist/LinkSight.app
 #
 #   # 2. Notarize with Apple
-#   xcrun notarytool submit dist/NetProbe.app --keychain-profile "notary" --wait
+#   xcrun notarytool submit dist/LinkSight.app --keychain-profile "notary" --wait
 #
 #   # 3. Staple the ticket so offline machines trust it
-#   xcrun stapler staple dist/NetProbe.app
+#   xcrun stapler staple dist/LinkSight.app
 #
 #   # 4. Re-zip and distribute
 #   Requires an Apple Developer account ($99/yr). Until then, ad-hoc builds
@@ -130,3 +130,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

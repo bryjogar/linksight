@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render NetProbe main window to PNGs (offscreen) for review. Usage: python shots.py OUTDIR"""
+"""Render LinkSight main window to PNGs (offscreen) for review. Usage: python shots.py OUTDIR"""
 
 import sys
 from pathlib import Path
@@ -7,15 +7,15 @@ from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
-from netprobe.ui.theme import apply
-from netprobe.ui.controller import AppController
-from netprobe.ui.main_window import MainWindow
+from linksight.ui.theme import apply
+from linksight.ui.controller import AppController
+from linksight.ui.main_window import MainWindow
 
-outdir = Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/netprobe-shots")
+outdir = Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/linksight-shots")
 outdir.mkdir(parents=True, exist_ok=True)
 
 app = QApplication(sys.argv[:1])
-app.setApplicationName("NetProbe")
+app.setApplicationName("LinkSight")
 apply(app)
 
 controller = AppController()
@@ -36,7 +36,7 @@ def snap():
     # show the raw frame feed in the shot
     window.feed_widget.setVisible(True)
     app.processEvents()
-    path = outdir / "netprobe_main.png"
+    path = outdir / "linksight_main.png"
     window.grab().save(str(path))
     print(str(path))
     controller.close()
@@ -45,3 +45,4 @@ def snap():
 
 QTimer.singleShot(8000, snap)
 app.exec()
+

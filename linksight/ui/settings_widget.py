@@ -91,7 +91,7 @@ class SettingsWidget(QWidget):
             progress.close()
             QMessageBox.warning(
                 self,
-                "NetProbe — Download failed",
+                "LinkSight — Download failed",
                 f"Could not download the Npcap installer.\n\n{e}\n\n"
                 f"Download it manually from {npcap.NPCAP_DOWNLOAD_PAGE}",
             )
@@ -103,7 +103,7 @@ class SettingsWidget(QWidget):
             return
         ret = QMessageBox.question(
             self,
-            "NetProbe — Npcap installer ready",
+            "LinkSight — Npcap installer ready",
             "The Npcap installer has been downloaded.\n\n"
             "Launch it now? You'll see a UAC prompt — allow it, then "
             "walk through the installer (defaults are fine).\n\n"
@@ -113,7 +113,8 @@ class SettingsWidget(QWidget):
             npcap.launch_installer(path)
         QMessageBox.information(
             self,
-            "NetProbe — After installing",
+            "LinkSight — After installing",
             "When the installer finishes, click 'Check again' to verify, "
-            "then restart NetProbe if it still shows not detected.",
+            "then restart LinkSight if it still shows not detected.",
         )
+

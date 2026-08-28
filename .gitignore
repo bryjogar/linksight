@@ -6,4 +6,4 @@ build/
 dist/
 *.spec.bak
 .pytest_cache/
-docs/netprobe_*.png
+

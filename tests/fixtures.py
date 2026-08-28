@@ -1,6 +1,6 @@
-"""Byte-accurate LLDP/CDP frame fixtures (re-exported from netprobe.parse.builders)."""
+"""Byte-accurate LLDP/CDP frame fixtures (re-exported from linksight.parse.builders)."""
 
-from netprobe.parse.builders import (
+from linksight.parse.builders import (
     build_lldp_frame,
     build_cdp_frame,
     eth,
@@ -10,3 +10,4 @@ from netprobe.parse.builders import (
 
 LLDP_SAMPLE = build_lldp_frame()
 CDP_SAMPLE = build_cdp_frame()
+

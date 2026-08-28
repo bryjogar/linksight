@@ -1,6 +1,6 @@
-"""NetProbe application controller: wires capture source -> UI state.
+"""LinkSight application controller: wires capture source -> UI state.
 
-In-memory only — NetProbe is a readout, not a data collector. The latest
+In-memory only — LinkSight is a readout, not a data collector. The latest
 observed LAN/switch facts are held here and pushed to the widgets via Qt
 signals.
 """

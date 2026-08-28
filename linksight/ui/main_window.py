@@ -29,7 +29,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.controller = controller
         self.demo = demo
-        self.setWindowTitle("NetProbe — LLDP/CDP Neighbor Discovery")
+        self.setWindowTitle("LinkSight — LLDP/CDP Neighbor Discovery")
         self.setWindowIcon(self._app_icon())
         self.setMinimumSize(1080, 720)
         self.resize(1280, 840)
@@ -68,12 +68,12 @@ class MainWindow(QMainWindow):
 
         candidates = []
         if getattr(sys, "frozen", False):
-            candidates.append(os.path.join(sys._MEIPASS, "netprobe.ico"))
+            candidates.append(os.path.join(sys._MEIPASS, "linksight.ico"))
         candidates.append(
-            os.path.join(os.path.dirname(__file__), "..", "..", "netprobe.ico")
+            os.path.join(os.path.dirname(__file__), "..", "..", "linksight.ico")
         )
         candidates.append(
-            os.path.join(os.path.dirname(sys.executable), "netprobe.ico")
+            os.path.join(os.path.dirname(sys.executable), "linksight.ico")
             if getattr(sys, "frozen", False) else ""
         )
         for path in candidates:
@@ -167,7 +167,7 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self):
         dlg = QDialog(self)
-        dlg.setWindowTitle("NetProbe Settings")
+        dlg.setWindowTitle("LinkSight Settings")
         dlg.setMinimumWidth(420)
         layout = QVBoxLayout(dlg)
         settings = SettingsWidget(self.controller)
@@ -189,15 +189,15 @@ class MainWindow(QMainWindow):
         else:
             iface = self.iface_combo.currentData()
             if not iface:
-                QMessageBox.warning(self, "NetProbe", "No network interface available.")
+                QMessageBox.warning(self, "LinkSight", "No network interface available.")
                 return
             if sys.platform == "win32":
                 from ..capture import npcap
                 if npcap.npcap_installed() is False:
                     ret = QMessageBox.warning(
                         self,
-                        "NetProbe — Npcap required",
-                        "Npcap is not installed. NetProbe needs it to capture "
+                        "LinkSight — Npcap required",
+                        "Npcap is not installed. LinkSight needs it to capture "
                         "packets on Windows.\n\n"
                         "Install Npcap from Settings, or download it from npcap.com.",
                         QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
@@ -266,11 +266,12 @@ class MainWindow(QMainWindow):
             return
         ok_launch, msg = launch_ssh_terminal(ip, username.strip())
         if not ok_launch:
-            QMessageBox.warning(self, "NetProbe — SSH", msg)
+            QMessageBox.warning(self, "LinkSight — SSH", msg)
 
     def _on_capture_error(self, msg: str) -> None:
         self.top_status.setText("Capture error")
-        QMessageBox.critical(self, "NetProbe — Capture Error", msg)
+        QMessageBox.critical(self, "LinkSight — Capture Error", msg)
+
 
     def _check_for_updates(self) -> None:
         """Check GitHub for a newer build — runs in background."""

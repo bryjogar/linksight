@@ -1,75 +1,72 @@
-# NetProbe
+# LinkSight
 
-Passive LLDP/CDP neighbor discovery for Windows and macOS — a desktop alternative to the Netool.io probe.
+Passive LLDP/CDP neighbor discovery for Windows, macOS, and Linux — identify which switch port and VLAN your device is connected to.
 
-![NetProbe main window](docs/netprobe_main.png)
+![LinkSight main window](docs/linksight_main.png)
 
-Plug into a switch port and NetProbe shows you the network in three clean panels:
+Plug into an Ethernet port and LinkSight presents the network environment in three panels:
 
-- **NIC Status** — every adapter on this machine, link state, IP, MAC
-- **LAN Info** — the attached network's identity: IP, subnet, gateway, DNS, DHCP server, MAC (read from the OS, plus what DHCP traffic is observed on the wire)
-- **Switch Info** — the neighbor the port is connected to: hostname, model, switch port (from the Port Description TLV), VLAN, management IPs. **Management IPs are clickable**: clicking one asks for an SSH username, then opens a terminal running `ssh user@ip`. The password is typed straight into the terminal's own ssh prompt — NetProbe never stores or logs it.
+- **NIC Status** — lists network adapters on the local machine with link status, IP address, MAC address, and hardware descriptions.
+- **LAN Info** — attached network identity: IP, subnet mask, gateway, DNS servers, DHCP server, and lease details read from the operating system and passively observed DHCP traffic.
+- **Switch Info** — neighbor device connected to the active switch port: system hostname, hardware model, switch port ID and port description, VLAN ID, and management IPs. **Management IPs are clickable**: clicking an IP prompts for an SSH username, then launches a system terminal session with `ssh username@ip`. Passwords are typed directly into the terminal's ssh prompt; LinkSight never captures or stores credentials.
 
-No history, no scanning, no tracking — a readout, not a collector. Capture runs automatically on launch; change the interface dropdown at any time to swap adapters live.
+No historical logs, no active scanning, and no background tracking — LinkSight operates as an in-memory readout. Packet capture starts automatically upon launch on the preferred adapter, and selecting a different interface from the dropdown updates the capture stream live.
 
-## Design language
+## Design
 
-K'Nex over Duplo. Professional, engineered, dense, precise. No bubble buttons,
-no flat pastel candy, no toy-app chrome. Same palette and styling as WiFi Explorer.
+Dark, engineering-focused UI designed for readability, high information density, and instant status assessment.
 
-## Quick start
+## Quick Start
 
-```
+```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python app.py                    # capture starts automatically
-python app.py --demo             # simulated network, no privileges needed
+python app.py --demo             # replay simulated network frames without capture privileges
 ```
 
 ## Build
 
-- **Windows (folder):** `python build_exe.py` → `dist/NetProbe/NetProbe.exe` (portable folder, no install; Npcap required on target)
-- **Windows (single file):** `python build_portable.py` → `dist/NetProbe-Portable.exe` — one self-contained exe, no `_internal` folder. Slower to start (extracts to temp each run) but pushable to a client device by remote tooling that only moves one file.
-- **macOS:** `python build_mac.py` → `dist/NetProbe.app` + zip (portable bundle; Gatekeeper note in script)
+- **Windows (Folder / Portable):** `python build_exe.py` → `dist/LinkSight/LinkSight.exe` (portable directory, extracts once at build time for instant startup; Npcap required on target).
+- **Windows (Single File):** `python build_portable.py` → `dist/LinkSight-Portable.exe` — single self-contained executable without `_internal/` folder. Convenient for remote deployment tools that transfer a single binary, though startup takes several seconds while decompressing to a temporary directory on each run.
+- **macOS:** `python build_mac.py` → `dist/LinkSight.app` and `dist/LinkSight-mac.zip` (portable application bundle).
 
-### Release via GitHub Actions (recommended)
+### Release via GitHub Actions
 
-Tag a release and CI builds both platforms and publishes a GitHub Release:
+Tag a release to trigger automated multi-platform builds and a GitHub Release:
 
+```bash
+git tag linksight-v1.0.0
+git push origin linksight-v1.0.0
 ```
-git tag netprobe-v1.0.0
-git push origin netprobe-v1.0.0
-```
 
-The workflow (`.github/workflows/netprobe.yml`) runs the test suite, builds
-Windows + macOS, zips both, and creates a release with the downloads attached.
-The in-app **Update available** link points at the latest release.
+The workflow (`.github/workflows/linksight.yml`) runs the test suite, builds Windows (portable folder and single-file executable) and macOS bundles, and publishes the release with downloadable artifacts attached.
 
-> Note: `dist/` is gitignored on purpose — CI builds from source on tag, so
-> release binaries never live in the repo. Tagging is the deliberate act.
+## Requirements & Privileges
 
-## Requirements
-
-- **Windows:** Npcap installed (from npcap.com)
-- **macOS:** capture needs BPF access (admin)
+- **Windows:** Npcap driver installed (available from [npcap.com](https://npcap.com/#download)). Administrator privileges are typically required for raw packet capture.
+- **macOS:** Packet capture requires BPF device access permissions (admin privileges / terminal permission).
+- **Linux:** Requires `CAP_NET_RAW` capability (e.g. running via `sudo` or Docker `cap_add: [NET_RAW]`).
 
 ## Debugging
 
-The **Raw frames** toggle at the bottom shows the exact bytes of every captured
-frame (hexdump) — copy any frame into Wireshark to verify what the switch sent.
+The **Raw frames** toggle at the bottom expands a live hexdump feed of captured LLDP, CDP, and DHCP frames, allowing frame verification against packet analyzers like Wireshark.
 
-## Structure
+## Project Structure
 
 ```
-app.py                  entry point
-build_exe.py            Windows portable build (PyInstaller onedir)
-build_mac.py            macOS portable build (.app + zip)
-netprobe.spec           PyInstaller spec (Windows)
-netprobe-mac.spec       PyInstaller spec (macOS)
-netprobe/
-  capture/              interface discovery + sniffing (Scapy) + demo replay
-  parse/                LLDP + CDP + DHCP parsers
-  ui/                   PySide6 readout widgets
-tests/                  pytest suite + frame fixtures
+app.py                  Application entry point
+build_exe.py            Windows portable build script (PyInstaller onedir)
+build_portable.py       Windows single-file portable build script
+build_mac.py            macOS portable build script (.app + zip)
+linksight.spec          PyInstaller spec (Windows onedir)
+linksight-onefile.spec  PyInstaller spec (Windows single-file with slimmed Qt dependencies)
+linksight-mac.spec      PyInstaller spec (macOS bundle)
+linksight/
+  capture/              Packet sniffing (Scapy), interface enumeration, Npcap helper, demo replay
+  parse/                LLDP, CDP, and DHCP frame parsers and data models
+  ui/                   PySide6 readout widgets, styling, and controller
+tests/                  pytest suite and byte-accurate frame fixtures
 ```
+

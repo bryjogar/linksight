@@ -1,7 +1,7 @@
 """Tests for the CDP parser."""
 
-from netprobe.parse.cdp import parse_cdp_frame
-from netprobe.parse.frames import parse_frame
+from linksight.parse.cdp import parse_cdp_frame
+from linksight.parse.frames import parse_frame
 from tests.fixtures import build_cdp_frame, CDP_SAMPLE
 
 
@@ -33,7 +33,8 @@ def test_cdp_snap_variant():
     frame = build_cdp_frame()
     # Rebuild with SNAP LLC form: dst/src + 0xaaaa + snap(00 00 0c 20 00) then CDP body
     import tests.fixtures as fx
-    from netprobe.parse.cdp import CDP_SNAP
+    from linksight.parse.cdp import CDP_SNAP
+
     body = frame[14:]
     snap_frame = fx.eth("01:00:0c:cc:cc:cc", "00:1a:2b:3c:4d:5e", 0xAAAA, CDP_SNAP + body)
     dev = parse_frame(snap_frame, "eth0")

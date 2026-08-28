@@ -2,9 +2,9 @@
 
 import pytest
 
-from netprobe.parse.lldp import parse_lldp_frame, extract_platform
-from netprobe.parse.frames import parse_frame
-from netprobe.parse.builders import _tlv, eth, LLDP_DST
+from linksight.parse.lldp import parse_lldp_frame, extract_platform
+from linksight.parse.frames import parse_frame
+from linksight.parse.builders import _tlv, eth, LLDP_DST
 from tests.fixtures import build_lldp_frame, LLDP_SAMPLE
 
 
@@ -50,8 +50,9 @@ def test_lldp_empty_frame():
 
 def test_lldp_port_description_wins_over_component_id():
     """Regression: HP/Aruba 2920 sends Port ID as opaque component (subtype 2)
-    and the real port in the Port Description TLV. NetProbe must show the
+    and the real port in the Port Description TLV. LinkSight must show the
     description ("3"), not the raw component bytes."""
+
     body = b""
     body += _tlv(1, b"\x04" + bytes.fromhex("941882d88440"))       # Chassis ID (MAC)
     body += _tlv(2, b"\x02\x07\x33\x06")                            # Port ID: subtype 2 (component)

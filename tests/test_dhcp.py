@@ -1,7 +1,8 @@
 """Tests for the DHCP parser."""
 
-from netprobe.parse.dhcp import parse_dhcp, MSG_OFFER, MSG_ACK, MSG_DISCOVER
-from netprobe.parse.builders import build_dhcp_frame, build_udp_frame
+from linksight.parse.dhcp import parse_dhcp, MSG_OFFER, MSG_ACK, MSG_DISCOVER
+from linksight.parse.builders import build_dhcp_frame, build_udp_frame
+
 
 
 def test_parse_offer():

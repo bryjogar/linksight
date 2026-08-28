@@ -2,7 +2,8 @@
 
 import sys
 
-from netprobe.capture import npcap
+from linksight.capture import npcap
+
 
 
 def test_npcap_installed_none_on_non_windows():

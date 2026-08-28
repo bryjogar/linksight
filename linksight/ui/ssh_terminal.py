@@ -1,7 +1,7 @@
 """Launch an interactive SSH session to a device in the OS terminal.
 
 Security model: the app passes ONLY the username and IP on the command line.
-The password is never touched by NetProbe — the terminal's own `ssh` prompt
+The password is never touched by LinkSight — the terminal's own `ssh` prompt
 collects it interactively, so nothing is stored or logged.
 """
 

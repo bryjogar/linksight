@@ -1,9 +1,9 @@
-"""NetProbe single-file portable build (for remote deployment tools).
+"""LinkSight single-file portable build (for remote deployment tools).
 
 Usage (Windows):
     python build_portable.py
 
-Output:  dist/NetProbe-Portable.exe  (~50-60 MB, ONE file, no _internal)
+Output:  dist/LinkSight-Portable.exe  (~50-60 MB, ONE file, no _internal)
 
 The onedir build (build_exe.py) is faster at launch but ships as a folder
 with _internal/.  This build bundles everything into a single exe that
@@ -32,7 +32,7 @@ def embed_version():
             sha = result.stdout.strip()
     except Exception:
         pass
-    version_file = PROJECT_DIR / "netprobe" / "version.py"
+    version_file = PROJECT_DIR / "linksight" / "version.py"
     version_file.write_text(
         f'# Auto-generated at build time by build_portable.py\n'
         f'__version_sha__ = "{sha}"\n'
@@ -44,7 +44,7 @@ def embed_version():
 
 def main():
     print("=" * 60)
-    print("NetProbe - single-file portable build")
+    print("LinkSight - single-file portable build")
     print(f"  Platform: {sys.platform}")
     print(f"  Python:   {sys.version.split()[0]}")
     print("=" * 60)
@@ -53,7 +53,7 @@ def main():
         print("ERROR: this script must run on Windows (PyInstaller can't cross-build).")
         sys.exit(1)
 
-    spec = PROJECT_DIR / "netprobe-onefile.spec"
+    spec = PROJECT_DIR / "linksight-onefile.spec"
     if not spec.exists():
         print(f"ERROR: {spec} not found")
         sys.exit(1)
@@ -77,9 +77,9 @@ def main():
         print("\nBuild FAILED. See output above for errors.")
         sys.exit(1)
 
-    exe_path = PROJECT_DIR / "dist" / "NetProbe-Portable.exe"
+    exe_path = PROJECT_DIR / "dist" / "LinkSight-Portable.exe"
     if not exe_path.exists():
-        print("\nERROR: expected NetProbe-Portable.exe but it wasn't produced.")
+        print("\nERROR: expected LinkSight-Portable.exe but it wasn't produced.")
         sys.exit(1)
 
     size_mb = exe_path.stat().st_size / (1024 * 1024)
@@ -91,3 +91,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

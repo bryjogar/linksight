@@ -1,6 +1,6 @@
 """Tests for the system IP config reader."""
 
-from netprobe.capture.system_info import (
+from linksight.capture.system_info import (
     InterfaceConfig,
     _fill_windows,
     _fill_linux,
@@ -46,7 +46,7 @@ def test_windows_ipconfig_parse():
     cfg = InterfaceConfig(name="Ethernet 2")
     _fill_windows(cfg, "Ethernet 2")
     # patch subprocess via module-level _run
-    import netprobe.capture.system_info as si
+    import linksight.capture.system_info as si
     si._run = FakeRun(IPCONFIG_SAMPLE)
     _fill_windows(cfg, "Ethernet 2")
 
@@ -59,7 +59,7 @@ def test_windows_ipconfig_parse():
 
 
 def test_windows_no_match():
-    import netprobe.capture.system_info as si
+    import linksight.capture.system_info as si
     si._run = FakeRun(IPCONFIG_SAMPLE)
     cfg = InterfaceConfig(name="Nonexistent Adapter")
     _fill_windows(cfg, "Nonexistent Adapter")
@@ -77,7 +77,8 @@ def test_linux_gateway_and_dns(tmp_path, monkeypatch):
     resolv = tmp_path / "resolv.conf"
     resolv.write_text("nameserver 10.0.0.1\nnameserver 8.8.8.8\n")
 
-    import netprobe.capture.system_info as si
+    import linksight.capture.system_info as si
+
 
     monkeypatch.setattr(si, "_PROC_ROUTE", str(route))
     monkeypatch.setattr(si, "_RESOLV_CONF", str(resolv))
