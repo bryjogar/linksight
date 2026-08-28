@@ -47,12 +47,12 @@ SCENARIO: list[tuple[str, bytes]] = [
         message_type=MSG_OFFER, offered_ip="10.0.0.42", server_ip="10.0.0.1",
         subnet_mask="255.255.255.0", gateways=["10.0.0.1"],
         dns_servers=["8.8.8.8", "1.1.1.1"], lease_seconds=86400,
-        domain="garrison.lan")),
+        domain="example.lan")),
     ("eth0", build_dhcp_frame(
         message_type=MSG_ACK, offered_ip="10.0.0.42", server_ip="10.0.0.1",
         subnet_mask="255.255.255.0", gateways=["10.0.0.1"],
         dns_servers=["8.8.8.8", "1.1.1.1"], lease_seconds=86400,
-        domain="garrison.lan")),
+        domain="example.lan")),
 ]
 
 

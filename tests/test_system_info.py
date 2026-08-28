@@ -20,7 +20,7 @@ Windows IP Configuration
 
 Ethernet adapter Ethernet 2:
 
-   Connection-specific DNS Suffix  . : garrison.lan
+   Connection-specific DNS Suffix  . : example.lan
    Description . . . . . . . . . . . : USB 10/100/1000 LAN
    Physical Address. . . . . . . . . : 22-77-EE-AD-6C-EE
    DHCP Enabled. . . . . . . . . . . : Yes
