@@ -50,6 +50,18 @@ def _format_speed(speed_mbps: int | None) -> tuple[str, str]:
     return (speed_str, color)
 
 
+def _safe_display_text(val: Any, fallback: str = "") -> str:
+    """Ensure display text is a clean string and never a bytes repr (b'...') or raw bytes."""
+    if not val:
+        return fallback
+    if isinstance(val, (bytes, bytearray)):
+        return fallback
+    s = str(val).strip()
+    if s.startswith("b'") or s.startswith('b"') or "b'" in s:
+        return fallback
+    return s
+
+
 def _format_port_status(port: PortDiagnostics) -> tuple[str, str]:
     """Return (status_text, hex_color) for port STP/oper status."""
     st = port.stp_state.upper()
@@ -269,9 +281,12 @@ class HopCardWidget(QFrame):
             btn_row.setSpacing(8)
 
             for cand in candidates:
-                cand_name = cand.neighbor_name or cand.neighbor_chassis or "Neighbor"
-                cand_ip = cand.neighbor_ip or ""
-                cand_port = cand.port_name or (f"Port {cand.port_id}" if cand.port_id is not None else "")
+                c_n = _safe_display_text(cand.neighbor_name)
+                c_ch = _safe_display_text(cand.neighbor_chassis)
+                cand_name = c_n or c_ch or "Neighbor"
+                cand_ip = _safe_display_text(cand.neighbor_ip) or ""
+                raw_port = cand.port_name or (f"Port {cand.port_id}" if cand.port_id is not None else "")
+                cand_port = _safe_display_text(raw_port)
                 if cand_ip:
                     port_suffix = f" on {cand_port}" if cand_port else ""
                     btn_text = f"▶ Try {cand_name} ({cand_ip}){port_suffix}"
@@ -409,12 +424,15 @@ class HopCardWidget(QFrame):
                 d_st_str, d_st_col = _format_port_status(downlink)
 
                 d_parts = []
-                if downlink.neighbor_name:
-                    d_parts.append(downlink.neighbor_name)
-                if downlink.neighbor_ip:
-                    d_parts.append(f"({downlink.neighbor_ip})")
-                if downlink.neighbor_port:
-                    d_parts.append(f"on {downlink.neighbor_port}")
+                d_n_name = _safe_display_text(downlink.neighbor_name) or _safe_display_text(downlink.neighbor_chassis)
+                if d_n_name:
+                    d_parts.append(d_n_name)
+                d_n_ip = _safe_display_text(downlink.neighbor_ip)
+                if d_n_ip:
+                    d_parts.append(f"({d_n_ip})")
+                d_n_port = _safe_display_text(downlink.neighbor_port)
+                if d_n_port:
+                    d_parts.append(f"on {d_n_port}")
                 d_neigh_str = " ".join(d_parts)
                 d_neigh_html = f" <span style='color:{FG_DIM}; font-size:11px;'>◀ {d_neigh_str}</span>" if d_neigh_str else ""
 
@@ -472,12 +490,15 @@ class HopCardWidget(QFrame):
                 u_st_str, u_st_col = _format_port_status(uplink)
 
                 u_parts = []
-                if uplink.neighbor_name:
-                    u_parts.append(uplink.neighbor_name)
-                if uplink.neighbor_ip:
-                    u_parts.append(f"({uplink.neighbor_ip})")
-                if uplink.neighbor_port:
-                    u_parts.append(f"on {uplink.neighbor_port}")
+                u_n_name = _safe_display_text(uplink.neighbor_name) or _safe_display_text(uplink.neighbor_chassis)
+                if u_n_name:
+                    u_parts.append(u_n_name)
+                u_n_ip = _safe_display_text(uplink.neighbor_ip)
+                if u_n_ip:
+                    u_parts.append(f"({u_n_ip})")
+                u_n_port = _safe_display_text(uplink.neighbor_port)
+                if u_n_port:
+                    u_parts.append(f"on {u_n_port}")
                 u_neigh_str = " ".join(u_parts)
                 u_neigh_html = f" <span style='color:{FG_DIM}; font-size:11px;'>▶ {u_neigh_str}</span>" if u_neigh_str else ""
 
@@ -638,12 +659,15 @@ class HopCardWidget(QFrame):
 
                 # 6. Neighbor
                 neigh_parts = []
-                if port.neighbor_name:
-                    neigh_parts.append(port.neighbor_name)
-                if port.neighbor_ip:
-                    neigh_parts.append(f"({port.neighbor_ip})")
-                if port.neighbor_port:
-                    neigh_parts.append(f"on {port.neighbor_port}")
+                p_n_name = _safe_display_text(port.neighbor_name) or _safe_display_text(port.neighbor_chassis)
+                if p_n_name:
+                    neigh_parts.append(p_n_name)
+                p_n_ip = _safe_display_text(port.neighbor_ip)
+                if p_n_ip:
+                    neigh_parts.append(f"({p_n_ip})")
+                p_n_port = _safe_display_text(port.neighbor_port)
+                if p_n_port:
+                    neigh_parts.append(f"on {p_n_port}")
                 neigh_str = " ".join(neigh_parts) if neigh_parts else "—"
                 it_neigh = QTableWidgetItem(neigh_str)
                 it_neigh.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)

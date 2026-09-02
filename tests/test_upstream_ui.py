@@ -1087,3 +1087,66 @@ def test_special_state_hop_shows_exactly_one_tag_and_normal_hop_zero():
     assert "FIREWALL EDGE" in header_tags_fw[0].text()
 
 
+def test_ui_candidate_button_and_summary_with_bytes_repr_never_leaks_b_repr():
+    """Verify candidate button and path summary never display b'...' when given raw bytes or bytes reprs."""
+    from PySide6.QtWidgets import QPushButton, QLabel
+    from linksight.discovery.models import Hop, PortDiagnostics, UpstreamPath
+
+    app = QApplication.instance() or QApplication([])
+
+    cand_bytes = PortDiagnostics(
+        port_id=47,
+        port_name="Port 47",
+        neighbor_name="b't\\x83\\xc2\\x19\\xa4'",
+        neighbor_ip="192.168.4.120",
+        neighbor_chassis="74:83:c2:11:22:33",
+        neighbor_port="b'5'",
+        link_speed_mbps=1000,
+    )
+    # Assert model normalized neighbor_name to chassis MAC and neighbor_port to '5'
+    assert cand_bytes.neighbor_name == "74:83:c2:11:22:33"
+    assert cand_bytes.neighbor_port == "5"
+    assert "b'" not in cand_bytes.neighbor_name
+    assert "b'" not in cand_bytes.neighbor_port
+
+    # Also test with raw bytes passed directly
+    downlink = PortDiagnostics(
+        port_id=1,
+        port_name="Port 1",
+        neighbor_name=b"Access-SW-01",
+        neighbor_ip="192.168.4.10",
+        neighbor_chassis="00:11:22:33:44:55",
+        neighbor_port=b"eth0",
+        is_downlink=True,
+    )
+    assert downlink.neighbor_name == "Access-SW-01"
+    assert downlink.neighbor_port == "eth0"
+
+    hop = Hop(
+        hop_index=1,
+        hostname="Aruba-Switch",
+        mgmt_ip="192.168.4.1",
+        status="root_claimed_but_uplinks_present",
+        ports=[downlink, cand_bytes],
+        downlink_port=downlink,
+        ambiguous_candidates=[cand_bytes],
+    )
+
+    widget = UpstreamWidget()
+    widget.show()
+    widget.show_path(UpstreamPath(start_ip="192.168.4.1", hops=[hop], edge_type="root_claimed_but_uplinks_present", success=False))
+
+    # Assert no QPushButton contains "b'"
+    cand_btns = [b for b in widget.findChildren(QPushButton) if "▶ Try" in b.text()]
+    assert len(cand_btns) == 1
+    assert "b'" not in cand_btns[0].text()
+    assert "▶ Try 74:83:c2:11:22:33 (192.168.4.120) on Port 47" == cand_btns[0].text()
+
+    # Assert no QLabel anywhere in the widget contains "b'"
+    for lbl in widget.findChildren(QLabel):
+        txt = lbl.text()
+        assert not txt.startswith("b'"), f"Label starts with b': {txt}"
+        assert "b'" not in txt, f"Label contains b': {txt}"
+
+
+

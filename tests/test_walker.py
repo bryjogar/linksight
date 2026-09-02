@@ -2047,3 +2047,159 @@ def test_hop1_fdb_walk_capped_on_large_table():
     # Downlink remains None without hanging
     assert result.hops[0].downlink_port is None
 
+
+def assert_no_bytes_repr_in_hop(hop: Hop) -> None:
+    """Assert that none of the Hop's metadata or port text fields contain b' or start with b'."""
+    text_fields = [
+        hop.hostname,
+        hop.sys_descr,
+        hop.platform,
+        hop.stp_root_bridge_id,
+        hop.stp_bridge_id,
+    ]
+    for val in text_fields:
+        assert isinstance(val, str), f"Field is not str: {val!r}"
+        assert not val.startswith("b'"), f"Field starts with b': {val!r}"
+        assert "b'" not in val, f"Field contains b': {val!r}"
+
+    for p in hop.ports:
+        port_fields = [
+            ("port_name", p.port_name),
+            ("neighbor_name", p.neighbor_name),
+            ("neighbor_port", p.neighbor_port),
+            ("neighbor_chassis", p.neighbor_chassis),
+            ("neighbor_ip", p.neighbor_ip),
+            ("platform", p.platform),
+            ("stp_state", p.stp_state),
+            ("oper_status", p.oper_status),
+            ("admin_status", p.admin_status),
+        ]
+        for name, val in port_fields:
+            assert isinstance(val, str), f"Port {p.port_id} {name} is not str: {val!r}"
+            assert not val.startswith("b'"), f"Port {p.port_id} {name} starts with b': {val!r}"
+            assert "b'" not in val, f"Port {p.port_id} {name} contains b': {val!r}"
+
+
+def test_walker_lldp_non_utf8_sysname_without_chassis_mac():
+    """Field bug reproduction: LLDP sysName is raw bytes that fail UTF-8 (partial MAC / binary).
+    When no valid chassis MAC is present, neighbor_name must be empty, never literal b'...'.
+    """
+    sw_ip = "192.168.4.1"
+    # Switch with neighbor reporting binary sysName b't\x83\xc2\x19\xa4'
+    sw_mib = {
+        OID_SYS_DESCR: "Switch 48G",
+        OID_SYS_NAME: "Edge-SW01",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("a0b1c2d3e4f5"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000a0b1c2d3e4f5"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_IF_NAME}.47": "47",
+        f"{OID_IF_SPEED}.47": 1000,
+        # LLDP remote entry with non-UTF8 sysName and no chassis MAC
+        f"{OID_LLDP_REM_SYS_NAME}.0.47.1": b"t\x83\xc2\x19\xa4",
+        f"{OID_LLDP_REM_PORT_ID}.0.47.1": "5",
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.0.47.1.1.4.192.168.4.120": 1,
+    }
+
+    factory = make_mock_client_factory({sw_ip: sw_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    assert len(result.hops) == 1
+    hop = result.hops[0]
+    p47 = next((p for p in hop.ports if p.port_id == 47), None)
+    assert p47 is not None
+    # neighbor_name must NOT contain b'...'
+    assert p47.neighbor_name == ""
+    assert p47.neighbor_ip == "192.168.4.120"
+    assert p47.neighbor_port == "5"
+
+    assert_no_bytes_repr_in_hop(hop)
+
+
+def test_walker_lldp_non_utf8_sysname_with_valid_chassis_mac():
+    """Field bug fix: LLDP sysName is binary bytes, but valid chassis MAC exists.
+    neighbor_name must fall back to formatted chassis MAC, never b'...'.
+    """
+    sw_ip = "192.168.4.1"
+    sw_mib = {
+        OID_SYS_DESCR: "Switch 48G",
+        OID_SYS_NAME: "Edge-SW01",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("a0b1c2d3e4f5"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000a0b1c2d3e4f5"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_IF_NAME}.47": "47",
+        f"{OID_IF_SPEED}.47": 1000,
+        # LLDP remote entry with binary sysName and valid chassis MAC
+        f"{OID_LLDP_REM_SYS_NAME}.0.47.1": b"t\x83\xc2\x19\xa4",
+        f"{OID_LLDP_REM_PORT_ID}.0.47.1": "5",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.47.1": bytes.fromhex("7483c2112233"),
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.0.47.1.1.4.192.168.4.120": 1,
+    }
+
+    factory = make_mock_client_factory({sw_ip: sw_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    assert len(result.hops) == 1
+    hop = result.hops[0]
+    p47 = next((p for p in hop.ports if p.port_id == 47), None)
+    assert p47 is not None
+    assert p47.neighbor_chassis == "74:83:c2:11:22:33"
+    assert p47.neighbor_name == "74:83:c2:11:22:33"
+    assert p47.neighbor_ip == "192.168.4.120"
+    assert p47.neighbor_port == "5"
+
+    assert_no_bytes_repr_in_hop(hop)
+
+
+def test_multi_hop_demo_fixture_no_bytes_repr():
+    """Verify demo fixtures and multi-hop paths contain zero bytes reprs in all Hop fields."""
+    from linksight.discovery.demo import get_demo_path
+
+    for start_ip in ("10.0.0.3", "10.0.0.2", "10.0.0.1", "192.168.1.50"):
+        path = get_demo_path(start_ip)
+        for hop in path.hops:
+            assert_no_bytes_repr_in_hop(hop)
+
+
+def test_text_util_direct():
+    """Verify text_util decode_text, decode_port_id, format_mac, decode_ip_address."""
+    from linksight.text_util import (
+        decode_text,
+        decode_port_id,
+        format_mac,
+        decode_ip_address,
+    )
+
+    # decode_text
+    assert decode_text(None) is None
+    assert decode_text("") == ""
+    assert decode_text("   ") == ""
+    assert decode_text("  Switch-1  ") == "Switch-1"
+    assert decode_text(b"Switch-1") == "Switch-1"
+    assert decode_text(b"t\x83\xc2\x19\xa4") is None
+    assert decode_text("b't\\x83\\xc2\\x19\\xa4'") is None
+    assert decode_text(123) == "123"
+    assert decode_text(b"line1\nline2") == "line1\nline2"
+    assert decode_text(b"null\x00byte") is None
+
+    # decode_port_id
+    assert decode_port_id("Gi1/0/1") == "Gi1/0/1"
+    assert decode_port_id(b"Gi1/0/1") == "Gi1/0/1"
+    assert decode_port_id(1) == "1"
+    assert decode_port_id(bytes.fromhex("001122334455")) == "00:11:22:33:44:55"
+    assert decode_port_id(b"\x01\x02\x03") == "010203"
+
+    # format_mac
+    assert format_mac(bytes.fromhex("7483c2112233")) == "74:83:c2:11:22:33"
+    assert format_mac("74-83-c2-11-22-33") == "74:83:c2:11:22:33"
+    assert format_mac("b't\\x83\\xc2\\x19\\xa4'") == "74:83:c2:19:a4"
+    assert format_mac("b'\\x74\\x83\\xc2\\x11\\x22\\x33'") == "74:83:c2:11:22:33"
+
+    # decode_ip_address
+    assert decode_ip_address(b"\xc0\xa8\x04\x78") == "192.168.4.120"
+    assert decode_ip_address("192.168.4.120") == "192.168.4.120"
+    assert decode_ip_address("b'\\xc0\\xa8\\x04\\x78'") == "192.168.4.120"
+    assert decode_ip_address(b"invalid_ip") is None
+
+

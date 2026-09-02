@@ -10,6 +10,7 @@ Frame format:
 from __future__ import annotations
 
 from .model import NeighborDevice
+from ..text_util import decode_text as _decode_text, decode_port_id as _decode_port_id
 
 CDP_DST = "01:00:0c:cc:cc:cc"
 CDP_SNAP = b"\xaa\xaa\x03\x00\x00\x0c\x20\x00"  # LLC SNAP + PID 0x2000
@@ -130,14 +131,15 @@ def parse_cdp_frame(frame: bytes, source_interface: str = "?") -> NeighborDevice
         tlv_type, _length, tlv_payload, offset = tlv
         tlvs[tlv_type] = tlv_payload
         if tlv_type == TLV_DEVICE_ID:
-            dev.chassis_id = tlv_payload.decode("utf-8", "replace")
+            dec = _decode_text(tlv_payload)
+            dev.chassis_id = dec if dec else tlv_payload.hex()
             dev.system_name = dev.chassis_id
         elif tlv_type == TLV_PORT_ID:
-            dev.port_id = tlv_payload.decode("utf-8", "replace")
+            dev.port_id = _decode_port_id(tlv_payload) or tlv_payload.hex()
         elif tlv_type == TLV_SOFTWARE_VERSION:
-            dev.system_description = tlv_payload.decode("utf-8", "replace")
+            dev.system_description = _decode_text(tlv_payload) or ""
         elif tlv_type == TLV_PLATFORM:
-            dev.platform = tlv_payload.decode("utf-8", "replace")
+            dev.platform = _decode_text(tlv_payload) or ""
         elif tlv_type == TLV_ADDRESSES:
             dev.management_ips = _addresses(tlv_payload)
         elif tlv_type == TLV_CAPABILITIES:

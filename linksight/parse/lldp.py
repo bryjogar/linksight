@@ -9,6 +9,7 @@ Frame format:
 from __future__ import annotations
 
 from .model import NeighborDevice
+from ..text_util import decode_text as _decode_text
 
 LLDP_ETHERTYPE = 0x88CC
 LLDP_MULTICAST = "01:80:c2:00:00:0e"
@@ -140,8 +141,9 @@ def parse_lldp_frame(frame: bytes, source_interface: str = "?") -> NeighborDevic
             dev.chassis_id = CHASSIS_ID_TYPES.get(st, f"type-{st}")
             if st == 4 and len(tlv_payload) >= 7:
                 dev.chassis_id = _hex_mac(tlv_payload[1:7])
-            elif st in (5,) and len(tlv_payload) >= 2:
-                dev.chassis_id = tlv_payload[1:].decode("utf-8", "replace")
+            elif st in (5, 7) and len(tlv_payload) >= 2:
+                dec = _decode_text(tlv_payload[1:])
+                dev.chassis_id = dec if dec else tlv_payload[1:].hex()
             else:
                 dev.chassis_id = tlv_payload[1:].hex()
         elif tlv_type == TLV_PORT_ID and len(tlv_payload) >= 1:
@@ -149,16 +151,17 @@ def parse_lldp_frame(frame: bytes, source_interface: str = "?") -> NeighborDevic
             dev.port_id_type = st
             if st == 3 and len(tlv_payload) >= 7:
                 dev.port_id = _hex_mac(tlv_payload[1:7])
-            elif st == 5 and len(tlv_payload) >= 2:
-                dev.port_id = tlv_payload[1:].decode("utf-8", "replace")
+            elif st in (5, 7) and len(tlv_payload) >= 2:
+                dec = _decode_text(tlv_payload[1:])
+                dev.port_id = dec if dec else tlv_payload[1:].hex()
             else:
                 dev.port_id = tlv_payload[1:].hex()
         elif tlv_type == TLV_SYSTEM_NAME:
-            dev.system_name = tlv_payload.decode("utf-8", "replace")
+            dev.system_name = _decode_text(tlv_payload) or ""
         elif tlv_type == TLV_SYSTEM_DESCRIPTION:
-            dev.system_description = tlv_payload.decode("utf-8", "replace")
+            dev.system_description = _decode_text(tlv_payload) or ""
         elif tlv_type == TLV_PORT_DESCRIPTION:
-            dev.raw_tlvs["port_description"] = tlv_payload.decode("utf-8", "replace")
+            dev.raw_tlvs["port_description"] = _decode_text(tlv_payload) or ""
         elif tlv_type == TLV_SYSTEM_CAPABILITIES:
             dev.capabilities = _caps(tlv_payload)
         elif tlv_type == TLV_MGMT_ADDRESS:
