@@ -410,7 +410,7 @@ ARUBA_MESH_DEMO_MIB: dict[str, any] = {
 }
 
 # Aruba switch MIB fixture variant: STP now reports the upstream UniFi (MAC
-# 74:83:c2:19:6d:a4) as root via root port 47 (Bryan set UniFi STP priority 4096).
+# 74:83:c2:19:6d:a4) as root via root port 47 (UniFi STP priority lowered to 4096).
 # Port 47's LLDP neighbor (UniFi-Switch) advertises NO management IP — the STP
 # auto-follow must ARP-resolve it from the chassis MAC or degrade to a candidate.
 ARUBA_STP_UPSTREAM_UNIFI_MIB: dict[str, any] = {
