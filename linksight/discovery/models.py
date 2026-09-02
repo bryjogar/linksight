@@ -18,6 +18,19 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _prefer_ipv4(ips: list[str]) -> str:
+    """Pick the preferred management address: first IPv4 non-link-local, else
+    first non-link-local (IPv6 global/ULA), else empty. IPv6 link-local alone
+    is never chosen — it is not walkable without a zone/scope ID."""
+    for ip in ips:
+        if ":" not in ip and not ip.lower().startswith("169.254."):
+            return ip
+    for ip in ips:
+        if ":" in ip and not ip.lower().startswith("fe80"):
+            return ip
+    return ""
+
+
 @dataclass
 class PortDiagnostics:
     """Per-port diagnostic data captured during discovery."""
@@ -33,6 +46,7 @@ class PortDiagnostics:
     is_root_port: bool = False
     neighbor_name: str = ""
     neighbor_ip: str = ""
+    neighbor_ips: list[str] = field(default_factory=list)
     neighbor_port: str = ""
     neighbor_chassis: str = ""
     is_uplink: bool = False
@@ -116,6 +130,27 @@ class PortDiagnostics:
                 self.neighbor_ip = self.neighbor_ip.strip()
         else:
             self.neighbor_ip = ""
+
+        # Normalize neighbor_ips list (dedupe, drop empties), then keep neighbor_ip
+        # in sync with the preferred address when the list is authoritative.
+        if isinstance(self.neighbor_ips, (bytes, bytearray)):
+            dec = decode_ip_address(self.neighbor_ips)
+            self.neighbor_ips = [dec] if dec else []
+        elif isinstance(self.neighbor_ips, str):
+            dec = decode_ip_address(self.neighbor_ips)
+            self.neighbor_ips = [dec] if dec else []
+        elif not isinstance(self.neighbor_ips, (list, tuple)):
+            self.neighbor_ips = []
+        cleaned_ips: list[str] = []
+        for ip in self.neighbor_ips:
+            dec = decode_ip_address(ip)
+            if dec and dec not in cleaned_ips:
+                cleaned_ips.append(dec)
+        self.neighbor_ips = cleaned_ips
+        if self.neighbor_ips and self.neighbor_ip not in self.neighbor_ips:
+            self.neighbor_ip = _prefer_ipv4(self.neighbor_ips)
+        elif self.neighbor_ip and self.neighbor_ip not in self.neighbor_ips:
+            self.neighbor_ips.insert(0, self.neighbor_ip)
 
         # Normalize platform
         if isinstance(self.platform, (bytes, bytearray)):

@@ -17,7 +17,7 @@ from ..text_util import (
     is_printable_text as _is_printable_text,
 )
 from .classifier import classify_device, is_edge_device
-from .models import Hop, PortDiagnostics, UpstreamPath
+from .models import Hop, PortDiagnostics, UpstreamPath, _prefer_ipv4
 from .arp_resolve import normalize_mac
 from .snmp_client import (
     SnmpClient,
@@ -261,6 +261,10 @@ class UpstreamWalker:
             if len(cleaned_mac) == 12:
                 norm_endpoint_mac = cleaned_mac
 
+        # Alternate addresses to probe for the CURRENT next-hop device when the
+        # first-chosen address does not answer SNMP (multi-address neighbors).
+        pending_alt_ips: list[str] = []
+
         while hop_index <= max_hops:
             if stop_check is not None and stop_check():
                 break
@@ -286,6 +290,16 @@ class UpstreamWalker:
                 except (SnmpTimeoutError, SnmpAuthError, SnmpError) as e:
                     is_auth = isinstance(e, SnmpAuthError) or "authorizationError" in str(e).lower()
                     is_timeout = isinstance(e, SnmpTimeoutError)
+                    # Multi-address neighbor: an unresponsive IP may just be the
+                    # wrong address (loopback/other iface). Probe remaining IPs
+                    # before giving up — but never on auth failure (a device that
+                    # rejects the community does so on every address).
+                    if not is_auth and pending_alt_ips:
+                        if progress_callback:
+                            progress_callback(f"{curr_ip} unreachable — trying alternate address {pending_alt_ips[0]}…")
+                        curr_ip = pending_alt_ips.pop(0)
+                        client.close()
+                        continue
                     status = "auth_failed" if is_auth else ("timeout" if is_timeout else "unreachable")
                     hop = Hop(
                         hop_index=hop_index,
@@ -777,7 +791,9 @@ class UpstreamWalker:
                             count = int(parts[-5]) if parts[-5].isdigit() else None
                             if subtype == 1 and count == 4 and p_cand is not None:
                                 ip_str = ".".join(parts[-4:])
-                                port_neighbors.setdefault(p_cand, {})["ip"] = ip_str
+                                ips_list = port_neighbors.setdefault(p_cand, {}).setdefault("ips", [])
+                                if ip_str not in ips_list:
+                                    ips_list.append(ip_str)
                 except Exception:
                     pass
 
@@ -803,7 +819,9 @@ class UpstreamWalker:
                         if p_cand is not None:
                             ip_str = _decode_ip_address(val)
                             if ip_str:
-                                port_neighbors.setdefault(p_cand, {})["ip"] = ip_str
+                                ips_list = port_neighbors.setdefault(p_cand, {}).setdefault("ips", [])
+                                if ip_str not in ips_list:
+                                    ips_list.append(ip_str)
                     for oid, val in client.walk(OID_CDP_CACHE_PLATFORM):
                         parts = oid.strip(".").split(".")
                         p_cand = int(parts[-2]) if (len(parts) >= 2 and parts[-2].isdigit()) else _parse_last_oid_index(oid)
@@ -882,7 +900,14 @@ class UpstreamWalker:
                     chassis_mac = neigh_chassis if (neigh_chassis and normalize_mac(neigh_chassis)) else ""
                     neigh_name = _decode_text(p_neigh.get("name")) or chassis_mac or ""
                     neigh_port = _decode_port_id(p_neigh.get("port")) or ""
-                    neigh_ip = _decode_ip_address(p_neigh.get("ip")) or (p_neigh.get("ip") if isinstance(p_neigh.get("ip"), str) else "")
+                    neigh_ips_raw: list[str] = p_neigh.get("ips") or ([p_neigh["ip"]] if p_neigh.get("ip") else [])
+                    neigh_ips = list(dict.fromkeys(neigh_ips_raw))
+                    # Legacy single-ip key may still carry an address not in the list
+                    legacy_ip = _decode_ip_address(p_neigh.get("ip")) if p_neigh.get("ip") else ""
+                    if legacy_ip and legacy_ip not in neigh_ips:
+                        neigh_ips.append(legacy_ip)
+                    # Keep the documented single field in sync with the preference rule
+                    neigh_ip = _prefer_ipv4(neigh_ips) if neigh_ips else (legacy_ip or "")
                     neigh_platform = _decode_text(p_neigh.get("platform")) or ""
                     clean_p_name = _decode_text(p_name) or f"Port {p_num}"
 
@@ -898,6 +923,7 @@ class UpstreamWalker:
                         is_root_port=is_this_root_port,
                         neighbor_name=neigh_name,
                         neighbor_ip=neigh_ip,
+                        neighbor_ips=neigh_ips,
                         neighbor_port=neigh_port,
                         neighbor_chassis=neigh_chassis,
                         is_uplink=is_this_root_port,
@@ -1338,6 +1364,17 @@ class UpstreamWalker:
                         hop.status = "unreachable"
                         break
 
+                # Multi-address neighbor: keep alternate addresses to probe if the
+                # preferred one does not answer SNMP. Prefer IPv4 ordering.
+                alt_ips = [
+                    ip for ip in (uplink_port_diag.neighbor_ips or [])
+                    if ip != uplink_port_diag.neighbor_ip and ":" not in ip
+                ]
+                alt_ips += [
+                    ip for ip in (uplink_port_diag.neighbor_ips or [])
+                    if ip != uplink_port_diag.neighbor_ip and ":" in ip and not ip.lower().startswith("fe80")
+                ]
+                pending_alt_ips = alt_ips[:3]
                 next_ip = uplink_port_diag.neighbor_ip
                 curr_ip = next_ip
                 hop_index += 1

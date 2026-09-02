@@ -193,6 +193,12 @@ def decode_ip_address(val: Any) -> str | None:
                     return decode_ip_address(evaluated)
             except Exception:
                 return None
+        if ":" in s:
+            # IPv6 (may carry a zone id like fe80::1%eth0) — validate loosely
+            zone = s.split("%")[0]
+            if ":" in zone and len(zone) >= 2:
+                return s
+            return None
         if "." in s and all(part.isdigit() for part in s.split(".") if part):
             return s
         if len(s) == 4:

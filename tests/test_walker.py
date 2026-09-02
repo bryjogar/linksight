@@ -2301,3 +2301,138 @@ def test_walker_stp_no_resolver_no_identity_still_unreachable():
     assert result.success is False
     assert result.edge_type == "unreachable"
     assert "has no management IP" in result.edge_summary
+
+
+def test_walker_multi_ip_neighbor_probes_alternate_address():
+    """Neighbor advertises MULTIPLE IPs and table order lists a non-responsive
+    address first. The walker must probe the alternate (correct mgmt) address
+    and reach hop 2 — not dead-end on the first address.
+    """
+    from linksight.discovery.demo import UNIFI_DEMO_MIB_NO_UPSTREAM
+
+    aruba_ip = "10.0.0.10"
+    wrong_ip = "10.9.9.9"     # loopback / other iface — no SNMP
+    mgmt_ip = "192.168.4.120" # real management address
+    aruba_mib = {
+        **UNIFI_DEMO_MIB_NO_UPSTREAM,
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+        # STP absent — LLDP fallback drives direction
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.47": 47,
+        f"{OID_IF_NAME}.47": "Port 47",
+        f"{OID_IF_HIGH_SPEED}.47": 1000,
+        f"{OID_LLDP_REM_SYS_NAME}.0.47.1": "UniFi-Switch",
+        f"{OID_LLDP_REM_PORT_ID}.0.47.1": "Port 1",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.47.1": bytes.fromhex("7483c2196da4"),
+        # TWO management addresses, wrong one first in table order
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.47.1.1.4.10.9.9.9": 1,
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.47.2.1.4.192.168.4.120": 1,
+    }
+    # wrong_ip times out; mgmt_ip answers with UniFi system data
+    unifi_mib = {
+        OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        OID_SYS_NAME: "UniFi-Switch",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("7483c2196da4"),
+    }
+    factory = make_mock_client_factory({aruba_ip: aruba_mib, mgmt_ip: unifi_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=aruba_ip, endpoint_mac="00:11:22:33:44:55")
+
+    assert result.success is True
+    assert len(result.hops) == 2
+    hop1 = result.hops[0]
+    assert hop1.uplink_port is not None
+    # First-advertised IPv4 is preferred for the initial probe (may be the
+    # wrong address — that's what alternate probing is for)
+    assert hop1.uplink_port.neighbor_ip == wrong_ip
+    assert hop1.uplink_port.neighbor_ips == ["10.9.9.9", mgmt_ip]
+    # The walk REACHED the real management address via the alternate probe
+    assert result.hops[1].mgmt_ip == mgmt_ip
+    assert result.hops[1].hostname == "UniFi-Switch"
+
+
+def test_walker_multi_ip_all_addresses_timeout_stops_cleanly():
+    """All advertised addresses fail SNMP — walk stops with timeout/unreachable,
+    not a crash or a loop."""
+    from linksight.discovery.demo import UNIFI_DEMO_MIB_NO_UPSTREAM
+
+    aruba_ip = "10.0.0.10"
+    wrong_a = "10.9.9.9"
+    wrong_b = "10.9.9.10"
+    aruba_mib = {
+        **UNIFI_DEMO_MIB_NO_UPSTREAM,
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.47": 47,
+        f"{OID_IF_NAME}.47": "Port 47",
+        f"{OID_IF_HIGH_SPEED}.47": 1000,
+        f"{OID_LLDP_REM_SYS_NAME}.0.47.1": "UniFi-Switch",
+        f"{OID_LLDP_REM_PORT_ID}.0.47.1": "Port 1",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.47.1": bytes.fromhex("7483c2196da4"),
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.47.1.1.4.10.9.9.9": 1,
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.47.2.1.4.10.9.9.10": 1,
+    }
+    factory = make_mock_client_factory({aruba_ip: aruba_mib})  # neither alt exists
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=aruba_ip, endpoint_mac="00:11:22:33:44:55")
+
+    assert result.success is False
+    assert len(result.hops) == 2  # aruba + the failed (timed-out) upstream hop
+    assert result.hops[1].status == "timeout"
+    assert "timeout" in result.edge_type or "unreachable" in result.edge_type
+
+
+def test_portdiagnostics_neighbor_ips_prefers_ipv4():
+    """PortDiagnostics neighbor_ips normalization: preferred neighbor_ip is the
+    first IPv4 non-link-local even when IPv6 comes first in the list."""
+    from linksight.discovery.models import PortDiagnostics
+
+    p = PortDiagnostics(
+        port_id=1,
+        neighbor_name="Dual",
+        neighbor_ips=["fe80::1:2:3:4", "2001:db8::5", "10.1.1.1"],
+    )
+    assert p.neighbor_ip == "10.1.1.1"
+    assert p.neighbor_ips == ["fe80::1:2:3:4", "2001:db8::5", "10.1.1.1"]
+
+    p2 = PortDiagnostics(port_id=1, neighbor_name="V6only", neighbor_ips=["fe80::1:2:3:4"])
+    assert p2.neighbor_ip == ""  # link-local alone is not walkable
+
+
+def test_walker_stp_disabled_single_upstream_auto_follows():
+    """Switch with STP DISABLED (no dot1dStp* OIDs) and ONE upstream LLDP neighbor
+    with a usable IP: the walker must fall back to LLDP direction and AUTO-FOLLOW
+    the single candidate to hop 2 — no manual candidate selection needed.
+    Regression for the field case (client box, STP-disabled switch)."""
+    sw_ip = "10.0.0.10"
+    upstream_ip = "192.168.4.120"
+    sw_mib = {
+        OID_SYS_DESCR: "Aruba 2930F-24G-4SFP+ Switch (JL259A), WC.16.10.0016",
+        OID_SYS_NAME: "Aruba-2930F",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+        # STP disabled: NO dot1dStp* OIDs at all
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.47": 47,
+        f"{OID_IF_NAME}.47": "Port 47",
+        f"{OID_IF_HIGH_SPEED}.47": 1000,
+        f"{OID_LLDP_REM_SYS_NAME}.0.47.1": "UniFi-Switch",
+        f"{OID_LLDP_REM_PORT_ID}.0.47.1": "Port 1",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.47.1": bytes.fromhex("7483c2196da4"),
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.47.1.1.4.192.168.4.120": 1,
+    }
+    upstream_mib = {
+        OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        OID_SYS_NAME: "UniFi-Switch",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("7483c2196da4"),
+    }
+    factory = make_mock_client_factory({sw_ip: sw_mib, upstream_ip: upstream_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip, endpoint_mac="00:11:22:33:44:55")
+
+    assert result.success is True
+    assert result.edge_type == "no_upstream"
+    assert len(result.hops) == 2
+    hop1 = result.hops[0]
+    assert hop1.status == "ok"
+    assert hop1.uplink_port is not None
+    assert hop1.uplink_port.port_id == 47
+    assert hop1.uplink_port.neighbor_ip == upstream_ip
+    assert result.hops[1].hostname == "UniFi-Switch"
+    assert result.hops[1].mgmt_ip == upstream_ip
