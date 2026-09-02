@@ -165,34 +165,64 @@ def test_hop_card_widget_wan_handoff():
 
 
 def test_switch_info_widget_upstream_button():
-    """Verify SwitchInfoWidget upstream button enables/disables and emits signal."""
+    """Verify SwitchInfoWidget upstream button enables on device presence and handles missing management IP."""
     app = QApplication.instance() or QApplication([])
 
     widget = SwitchInfoWidget()
     assert widget.upstream_btn.isEnabled() is False
+    assert widget.upstream_btn.toolTip() == "No switch detected"
 
-    # Show a device with management IP
-    dev = NeighborDevice(
+    # 1. Device WITHOUT management IP (UniFi switch case)
+    dev_no_ip = NeighborDevice(
+        protocol="lldp",
+        source_interface="eth0",
+        system_name="USW-Lite-16-PoE",
+        management_ips=[],
+        port_id="Port 1",
+    )
+    widget.show_device(dev_no_ip)
+    assert widget.upstream_btn.isEnabled() is True
+    assert widget._current_mgmt_ip == ""
+    assert widget.upstream_btn.toolTip() == (
+        "No management IP advertised by switch — click to enter the switch management IP"
+    )
+
+    # Clicking button with no IP emits empty string
+    emitted_ips = []
+    widget.upstream_requested.connect(emitted_ips.append)
+    widget.upstream_btn.click()
+    assert emitted_ips == [""]
+
+    # 2. Clear disables button
+    widget.clear()
+    assert widget.upstream_btn.isEnabled() is False
+    assert widget._current_mgmt_ip == ""
+    assert widget.upstream_btn.toolTip() == "No switch detected"
+
+    # 3. Device WITH management IP
+    dev_with_ip = NeighborDevice(
         protocol="lldp",
         source_interface="eth0",
         system_name="Core-SW1",
         management_ips=["10.0.0.2"],
         port_id="Gi0/24",
     )
-    widget.show_device(dev)
+    widget.show_device(dev_with_ip)
     assert widget.upstream_btn.isEnabled() is True
     assert widget._current_mgmt_ip == "10.0.0.2"
+    assert widget.upstream_btn.toolTip() == "Walk upstream switches starting from 10.0.0.2"
 
-    # Test clicking emits signal
-    emitted_ips = []
-    widget.upstream_requested.connect(emitted_ips.append)
+    emitted_ips.clear()
     widget.upstream_btn.click()
     assert emitted_ips == ["10.0.0.2"]
 
-    # Clear disables button
-    widget.clear()
-    assert widget.upstream_btn.isEnabled() is False
-    assert widget._current_mgmt_ip == ""
+    # 4. Setting management IP manually updates widget state
+    widget.set_management_ip("192.168.1.50")
+    assert widget._current_mgmt_ip == "192.168.1.50"
+    assert widget.upstream_btn.toolTip() == "Walk upstream switches starting from 192.168.1.50"
+    emitted_ips.clear()
+    widget.upstream_btn.click()
+    assert emitted_ips == ["192.168.1.50"]
 
 
 def test_main_window_demo_upstream_discovery():
@@ -213,6 +243,69 @@ def test_main_window_demo_upstream_discovery():
         # Verify upstream widget received the path
         assert window.upstream_widget.summary_label.text() != ""
         assert len(window.controller.upstream_path.hops) == 3
+    finally:
+        window.close()
+        controller.close()
+
+
+def test_main_window_demo_upstream_discovery_empty_ip():
+    """Verify MainWindow in demo mode starts walk falling back to 10.0.0.3 when start_ip is empty."""
+    app = QApplication.instance() or QApplication([])
+    controller = AppController()
+    window = MainWindow(controller, demo=True)
+
+    try:
+        # Trigger upstream discovery with empty start_ip (e.g. from UniFi button click)
+        window._on_upstream_requested("")
+        assert window._upstream_worker is not None
+        assert window._upstream_worker.start_ip == "10.0.0.3"
+        assert window.switch_widget._current_mgmt_ip == "10.0.0.3"
+        assert "10.0.0.3" in window.upstream_widget.summary_label.text()
+
+        # Wait for worker thread to complete
+        window._upstream_worker.wait(5000)
+        QCoreApplication.processEvents()
+
+        # Verify upstream widget received the path
+        assert window.upstream_widget.summary_label.text() != ""
+        assert len(window.controller.upstream_path.hops) == 3
+    finally:
+        window.close()
+        controller.close()
+
+
+def test_main_window_real_upstream_discovery_prompt(monkeypatch):
+    """Verify MainWindow in real mode prompts for switch IP when empty, and validates IPv4."""
+    from PySide6.QtWidgets import QInputDialog
+    from linksight.ui.main_window import UpstreamWorker
+
+    app = QApplication.instance() or QApplication([])
+    controller = AppController()
+    window = MainWindow(controller, demo=False)
+
+    try:
+        # 1. User cancels IP dialog -> nothing happens
+        monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: ("", False))
+        window._on_upstream_requested("")
+        assert window._upstream_worker is None
+
+        # Prevent worker thread from running actual SNMP network calls
+        monkeypatch.setattr(UpstreamWorker, "start", lambda self: None)
+
+        # 2. User enters invalid IP, then valid IP, then SNMP community
+        dialog_responses = [
+            ("bad-ip", True),
+            ("192.168.1.10", True),
+            ("public", True),
+        ]
+        monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: dialog_responses.pop(0))
+
+        window._on_upstream_requested("")
+        assert window.switch_widget._current_mgmt_ip == "192.168.1.10"
+        assert window._current_walk_ip == "192.168.1.10"
+        assert window._upstream_worker is not None
+        assert window._upstream_worker.start_ip == "192.168.1.10"
+        assert window._upstream_worker.community == "public"
     finally:
         window.close()
         controller.close()

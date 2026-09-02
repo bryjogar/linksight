@@ -65,8 +65,19 @@ class SwitchInfoWidget(QWidget):
         self.clear()
 
     def _on_upstream_clicked(self) -> None:
-        if self._current_mgmt_ip:
-            self.upstream_requested.emit(self._current_mgmt_ip)
+        self.upstream_requested.emit(self._current_mgmt_ip)
+
+    def set_management_ip(self, ip: str) -> None:
+        """Update the management IP (e.g. if entered manually by the user)."""
+        self._current_mgmt_ip = ip
+        if ip:
+            self.upstream_btn.setEnabled(True)
+            self.upstream_btn.setToolTip(f"Walk upstream switches starting from {ip}")
+        else:
+            self.upstream_btn.setEnabled(True)
+            self.upstream_btn.setToolTip(
+                "No management IP advertised by switch — click to enter the switch management IP"
+            )
 
     def show_device(self, dev) -> None:
         raw = dev.raw_tlvs or {}
@@ -95,8 +106,10 @@ class SwitchInfoWidget(QWidget):
             self.upstream_btn.setToolTip(f"Walk upstream switches starting from {self._current_mgmt_ip}")
         else:
             self._current_mgmt_ip = ""
-            self.upstream_btn.setEnabled(False)
-            self.upstream_btn.setToolTip("No management IP discovered on switch")
+            self.upstream_btn.setEnabled(True)
+            self.upstream_btn.setToolTip(
+                "No management IP advertised by switch — click to enter the switch management IP"
+            )
 
     def clear(self) -> None:
         self._current_mgmt_ip = ""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import sys
 import time
 
@@ -315,15 +316,36 @@ class MainWindow(QMainWindow):
     def _on_upstream_requested(self, start_ip: str) -> None:
         """Trigger an upstream discovery walk starting from start_ip."""
         if not start_ip:
-            if self.switch_widget._current_mgmt_ip:
-                start_ip = self.switch_widget._current_mgmt_ip
+            start_ip = self.switch_widget._current_mgmt_ip
+
+        if not start_ip:
+            if self.demo:
+                start_ip = "10.0.0.3"
             else:
-                QMessageBox.information(
-                    self,
-                    "LinkSight — Upstream Discovery",
-                    "No switch management IP detected.",
+                prompt_label = (
+                    "Switch Management IPv4 Address:\n"
+                    "(Switch did not advertise a management IP via LLDP/CDP)"
                 )
-                return
+                while True:
+                    ip_in, ok = QInputDialog.getText(
+                        self,
+                        "LinkSight — Upstream Discovery",
+                        prompt_label,
+                        QLineEdit.EchoMode.Normal,
+                    )
+                    if not ok or not ip_in.strip():
+                        return
+                    candidate = ip_in.strip()
+                    try:
+                        ipaddress.IPv4Address(candidate)
+                        start_ip = candidate
+                        break
+                    except ValueError:
+                        prompt_label = (
+                            "Invalid IPv4 address. Please enter a valid switch management IPv4:"
+                        )
+
+            self.switch_widget.set_management_ip(start_ip)
 
         if self.demo:
             community = "public"
