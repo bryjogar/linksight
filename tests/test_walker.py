@@ -557,6 +557,182 @@ def test_classifier():
     assert classify_device("Palo Alto Networks PA-3220", "pan-gw") == "firewall"
     assert classify_device("Cisco IOS Software, C2960X", "Core-SW1") == "switch"
     assert classify_device("Cisco IOS Software, ISR4331/K9", "Branch-Router") == "router"
+    assert classify_device("UniFi Dream Machine Pro Gateway", "UDM-Pro") == "router"
+    assert classify_device("UniFi Switch USW-Lite-16-PoE", "USW-Lite-16-PoE") == "switch"
     assert is_edge_device("firewall") is True
     assert is_edge_device("router") is True
     assert is_edge_device("switch") is False
+
+
+def test_walker_stp_absent_single_lldp_neighbor():
+    """Verify that when STP data is absent, a single upstream LLDP neighbor is followed."""
+    unifi_ip = "192.168.1.20"
+    core_ip = "10.0.0.2"
+
+    unifi_mib = {
+        OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        OID_SYS_NAME: "USW-Lite-16-PoE",
+        # NO dot1dStp* OIDs
+        f"{OID_IF_NAME}.1": "Port 1",
+        f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+        f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+        f"{OID_IF_NAME}.16": "Port 16",
+        f"{OID_LLDP_REM_SYS_NAME}.0.16.1": "Core-SW1",
+        f"{OID_LLDP_REM_PORT_ID}.0.16.1": "Gi0/24",
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.16.1.1.4.10.0.0.2": 1,
+    }
+    core_mib = {
+        OID_SYS_DESCR: "Cisco Catalyst 2960X",
+        OID_SYS_NAME: "Core-SW1",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001a2b3c4d5e"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000001a2b3c4d5e"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_IF_NAME}.24": "Gi0/24",
+    }
+
+    device_mibs = {
+        unifi_ip: unifi_mib,
+        core_ip: core_mib,
+    }
+
+    progress_messages = []
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=unifi_ip, progress_callback=progress_messages.append)
+
+    assert result.success is True
+    assert len(result.hops) == 2
+    assert any("STP MIB not available on USW-Lite-16-PoE — using LLDP neighbor direction" in m for m in progress_messages)
+
+    hop1 = result.hops[0]
+    assert hop1.hostname == "USW-Lite-16-PoE"
+    assert hop1.mgmt_ip == unifi_ip
+    assert hop1.is_stp_root is False
+    assert hop1.stp_root_port_num is None
+    assert hop1.uplink_port is not None
+    assert hop1.uplink_port.port_id == 16
+    assert hop1.uplink_port.is_uplink is True
+    assert hop1.uplink_port.is_root_port is False
+    assert hop1.uplink_port.neighbor_ip == core_ip
+    assert hop1.uplink_port.neighbor_name == "Core-SW1"
+    assert hop1.status == "ok"
+
+    hop2 = result.hops[1]
+    assert hop2.hostname == "Core-SW1"
+    assert hop2.is_stp_root is True
+    assert result.edge_type == "stp_root"
+
+
+def test_walker_stp_absent_zero_lldp_neighbors_edge_stop():
+    """Verify that when STP data is absent and no LLDP upstream neighbor exists, walk stops cleanly as no_upstream."""
+    unifi_ip = "192.168.1.20"
+
+    unifi_mib = {
+        OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        OID_SYS_NAME: "USW-Lite-16-PoE",
+        # NO dot1dStp* OIDs, only downlink to host without IP
+        f"{OID_IF_NAME}.1": "Port 1",
+        f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+        f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+    }
+
+    device_mibs = {unifi_ip: unifi_mib}
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=unifi_ip)
+
+    assert result.success is True
+    assert len(result.hops) == 1
+    hop = result.hops[0]
+    assert hop.hostname == "USW-Lite-16-PoE"
+    assert hop.status == "no_upstream"
+    assert hop.is_stp_root is False
+    assert hop.uplink_port is None
+    assert result.edge_type == "no_upstream"
+    assert "No upstream neighbor visible from USW-Lite-16-PoE (192.168.1.20) via LLDP — this switch appears to be the network edge." in result.edge_summary
+    assert "root port None has no management IP" not in result.edge_summary
+
+
+def test_walker_stp_absent_multiple_lldp_neighbors_ambiguous():
+    """Verify that when STP data is absent and multiple LLDP candidate uplinks exist, walk stops gracefully as ambiguous."""
+    unifi_ip = "192.168.1.20"
+
+    unifi_mib = {
+        OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        OID_SYS_NAME: "USW-Lite-16-PoE",
+        # Downlink to host
+        f"{OID_IF_NAME}.1": "Port 1",
+        f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+        f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+        # Uplink candidate 1
+        f"{OID_IF_NAME}.15": "Port 15",
+        f"{OID_LLDP_REM_SYS_NAME}.0.15.1": "SW-A",
+        f"{OID_LLDP_REM_PORT_ID}.0.15.1": "Gi0/1",
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.15.1.1.4.10.0.0.10": 1,
+        # Uplink candidate 2
+        f"{OID_IF_NAME}.16": "Port 16",
+        f"{OID_LLDP_REM_SYS_NAME}.0.16.1": "SW-B",
+        f"{OID_LLDP_REM_PORT_ID}.0.16.1": "Gi0/2",
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.16.1.1.4.10.0.0.20": 1,
+    }
+
+    device_mibs = {
+        unifi_ip: unifi_mib,
+        "10.0.0.10": {OID_SYS_DESCR: "Switch A", OID_SYS_NAME: "SW-A"},
+        "10.0.0.20": {OID_SYS_DESCR: "Switch B", OID_SYS_NAME: "SW-B"},
+    }
+
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=unifi_ip)
+
+    assert result.success is False
+    assert len(result.hops) == 1
+    hop = result.hops[0]
+    assert hop.hostname == "USW-Lite-16-PoE"
+    assert hop.status == "ambiguous"
+    assert hop.uplink_port is None
+    assert result.edge_type == "ambiguous"
+    assert "multiple upstream LLDP candidate neighbors" in result.edge_summary
+    assert "SW-A" in result.edge_summary
+    assert "10.0.0.10" in result.edge_summary
+    assert "SW-B" in result.edge_summary
+    assert "10.0.0.20" in result.edge_summary
+
+
+def test_walker_stp_absent_single_edge_router_neighbor():
+    """Verify that when STP is absent and single LLDP neighbor is a router/firewall, walk continues and terminates as edge."""
+    from linksight.discovery.demo import UNIFI_DEMO_MIB_WITH_UPSTREAM, UNIFI_GATEWAY_DEMO_MIB
+
+    unifi_ip = "192.168.1.20"
+    gateway_ip = "192.168.1.1"
+
+    device_mibs = {
+        unifi_ip: UNIFI_DEMO_MIB_WITH_UPSTREAM,
+        gateway_ip: UNIFI_GATEWAY_DEMO_MIB,
+    }
+
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=unifi_ip)
+
+    assert result.success is True
+    assert len(result.hops) == 2
+    assert result.edge_type == "router"
+
+    hop1 = result.hops[0]
+    assert hop1.hostname == "USW-Lite-16-PoE"
+    assert hop1.uplink_port is not None
+    assert hop1.uplink_port.neighbor_ip == gateway_ip
+    assert hop1.uplink_port.is_root_port is False
+    assert hop1.uplink_port.is_uplink is True
+
+    hop2 = result.hops[1]
+    assert hop2.hostname == "UDM-Pro"
+    assert hop2.device_type == "router"
+    assert hop2.status == "router_reached"
+    assert hop2.wan_interface is not None
+    assert hop2.wan_interface.port_name == "wan1"
+    assert hop2.isp_gateway == "198.51.100.1"
+    assert "Edge router reached: UDM-Pro" in result.edge_summary
+    assert "198.51.100.1" in result.edge_summary

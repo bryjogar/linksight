@@ -3,6 +3,21 @@
 from __future__ import annotations
 
 from .models import Hop, PortDiagnostics, UpstreamPath
+from .walker import (
+    OID_SYS_DESCR,
+    OID_SYS_OBJECT_ID,
+    OID_SYS_NAME,
+    OID_IF_NAME,
+    OID_IF_HIGH_SPEED,
+    OID_IF_OPER_STATUS,
+    OID_IF_ADMIN_STATUS,
+    OID_LLDP_REM_SYS_NAME,
+    OID_LLDP_REM_PORT_ID,
+    OID_LLDP_REM_MAN_ADDR_TABLE,
+    OID_IP_ROUTE_NEXT_HOP_DEFAULT,
+    OID_IP_ROUTE_IF_INDEX_DEFAULT,
+    OID_IP_NET_TO_MEDIA_TABLE,
+)
 
 # Canned multi-hop upstream chain for demo mode
 DEMO_HOPS: list[Hop] = [
@@ -257,8 +272,243 @@ DEMO_HOPS: list[Hop] = [
 ]
 
 
+# UniFi Switch without STP BRIDGE-MIB (Variant A: upstream gateway via LLDP)
+UNIFI_DEMO_MIB_WITH_UPSTREAM: dict[str, any] = {
+    OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+    OID_SYS_NAME: "USW-Lite-16-PoE",
+    OID_SYS_OBJECT_ID: "1.3.6.1.4.1.41112.1.4",
+    f"{OID_IF_NAME}.1": "Port 1",
+    f"{OID_IF_HIGH_SPEED}.1": 1000,
+    f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+    f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+    f"{OID_IF_NAME}.16": "Port 16",
+    f"{OID_IF_HIGH_SPEED}.16": 1000,
+    f"{OID_LLDP_REM_SYS_NAME}.0.16.1": "UDM-Pro",
+    f"{OID_LLDP_REM_PORT_ID}.0.16.1": "Port 9",
+    f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.16.1.1.4.192.168.1.1": 1,
+}
+
+# Upstream UniFi Gateway / Router MIB
+UNIFI_GATEWAY_DEMO_MIB: dict[str, any] = {
+    OID_SYS_DESCR: "UniFi Dream Machine Pro Gateway, Linux 5.4.0-ui-alp",
+    OID_SYS_NAME: "UDM-Pro",
+    OID_SYS_OBJECT_ID: "1.3.6.1.4.1.41112.1.1",
+    OID_IP_ROUTE_NEXT_HOP_DEFAULT: "198.51.100.1",
+    OID_IP_ROUTE_IF_INDEX_DEFAULT: 9,
+    f"{OID_IF_NAME}.8": "lan",
+    f"{OID_IF_HIGH_SPEED}.8": 1000,
+    f"{OID_IF_OPER_STATUS}.8": 1,
+    f"{OID_IF_ADMIN_STATUS}.8": 1,
+    f"{OID_IF_NAME}.9": "wan1",
+    f"{OID_IF_HIGH_SPEED}.9": 1000,
+    f"{OID_IF_OPER_STATUS}.9": 1,
+    f"{OID_IF_ADMIN_STATUS}.9": 1,
+    f"{OID_IP_NET_TO_MEDIA_TABLE}.1.8.192.168.1.20": 8,
+    f"{OID_IP_NET_TO_MEDIA_TABLE}.3.8.192.168.1.20": "192.168.1.20",
+}
+
+# UniFi Switch without STP BRIDGE-MIB (Variant B: no upstream LLDP neighbor)
+UNIFI_DEMO_MIB_NO_UPSTREAM: dict[str, any] = {
+    OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+    OID_SYS_NAME: "USW-Lite-16-PoE",
+    OID_SYS_OBJECT_ID: "1.3.6.1.4.1.41112.1.4",
+    f"{OID_IF_NAME}.1": "Port 1",
+    f"{OID_IF_HIGH_SPEED}.1": 1000,
+    f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+    f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+}
+
+UNIFI_DEMO_HOPS_WITH_UPSTREAM: list[Hop] = [
+    Hop(
+        hop_index=1,
+        hostname="USW-Lite-16-PoE",
+        mgmt_ip="192.168.1.20",
+        sys_descr="UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        platform="Ubiquiti USW-Lite-16-PoE",
+        device_type="switch",
+        is_stp_root=False,
+        status="ok",
+        response_time_ms=3.1,
+        ports=[
+            PortDiagnostics(
+                port_id=1,
+                port_name="Port 1",
+                stp_state="unknown",
+                link_speed_mbps=1000,
+                is_downlink=True,
+                neighbor_name="Local-Host",
+                neighbor_port="eth0",
+            ),
+            PortDiagnostics(
+                port_id=16,
+                port_name="Port 16",
+                stp_state="unknown",
+                link_speed_mbps=1000,
+                is_uplink=True,
+                neighbor_name="UDM-Pro",
+                neighbor_ip="192.168.1.1",
+                neighbor_port="Port 9",
+            ),
+        ],
+        uplink_port=PortDiagnostics(
+            port_id=16,
+            port_name="Port 16",
+            stp_state="unknown",
+            link_speed_mbps=1000,
+            is_uplink=True,
+            neighbor_name="UDM-Pro",
+            neighbor_ip="192.168.1.1",
+            neighbor_port="Port 9",
+        ),
+        downlink_port=PortDiagnostics(
+            port_id=1,
+            port_name="Port 1",
+            stp_state="unknown",
+            link_speed_mbps=1000,
+            is_downlink=True,
+            neighbor_name="Local-Host",
+            neighbor_port="eth0",
+        ),
+    ),
+    Hop(
+        hop_index=2,
+        hostname="UDM-Pro",
+        mgmt_ip="192.168.1.1",
+        sys_descr="UniFi Dream Machine Pro Gateway, Linux 5.4.0-ui-alp",
+        platform="Ubiquiti UniFi Dream Machine Pro",
+        device_type="router",
+        is_stp_root=False,
+        default_gateway="198.51.100.1",
+        status="router_reached",
+        response_time_ms=2.4,
+        isp_gateway="198.51.100.1",
+        wan_interface=PortDiagnostics(
+            port_id=9,
+            port_name="wan1",
+            link_speed_mbps=1000,
+            oper_status="up",
+            admin_status="up",
+            is_uplink=True,
+            neighbor_name="ISP Gateway",
+            neighbor_ip="198.51.100.1",
+        ),
+        lan_interface=PortDiagnostics(
+            port_id=8,
+            port_name="lan",
+            link_speed_mbps=1000,
+            oper_status="up",
+            admin_status="up",
+            is_downlink=True,
+            neighbor_name="USW-Lite-16-PoE",
+            neighbor_ip="192.168.1.20",
+            neighbor_port="Port 16",
+        ),
+        ports=[
+            PortDiagnostics(
+                port_id=8,
+                port_name="lan",
+                link_speed_mbps=1000,
+                oper_status="up",
+                admin_status="up",
+                is_downlink=True,
+                neighbor_name="USW-Lite-16-PoE",
+                neighbor_ip="192.168.1.20",
+                neighbor_port="Port 16",
+            ),
+            PortDiagnostics(
+                port_id=9,
+                port_name="wan1",
+                link_speed_mbps=1000,
+                oper_status="up",
+                admin_status="up",
+                is_uplink=True,
+                neighbor_name="ISP Gateway",
+                neighbor_ip="198.51.100.1",
+            ),
+        ],
+        uplink_port=PortDiagnostics(
+            port_id=9,
+            port_name="wan1",
+            link_speed_mbps=1000,
+            oper_status="up",
+            admin_status="up",
+            is_uplink=True,
+            neighbor_name="ISP Gateway",
+            neighbor_ip="198.51.100.1",
+        ),
+        downlink_port=PortDiagnostics(
+            port_id=8,
+            port_name="lan",
+            link_speed_mbps=1000,
+            oper_status="up",
+            admin_status="up",
+            is_downlink=True,
+            neighbor_name="USW-Lite-16-PoE",
+            neighbor_ip="192.168.1.20",
+            neighbor_port="Port 16",
+        ),
+    ),
+]
+
+UNIFI_DEMO_HOPS_NO_UPSTREAM: list[Hop] = [
+    Hop(
+        hop_index=1,
+        hostname="USW-Lite-16-PoE",
+        mgmt_ip="192.168.1.20",
+        sys_descr="UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        platform="Ubiquiti USW-Lite-16-PoE",
+        device_type="switch",
+        is_stp_root=False,
+        status="no_upstream",
+        response_time_ms=3.1,
+        ports=[
+            PortDiagnostics(
+                port_id=1,
+                port_name="Port 1",
+                stp_state="unknown",
+                link_speed_mbps=1000,
+                is_downlink=True,
+                neighbor_name="Local-Host",
+                neighbor_port="eth0",
+            ),
+        ],
+        uplink_port=None,
+        downlink_port=PortDiagnostics(
+            port_id=1,
+            port_name="Port 1",
+            stp_state="unknown",
+            link_speed_mbps=1000,
+            is_downlink=True,
+            neighbor_name="Local-Host",
+            neighbor_port="eth0",
+        ),
+    ),
+]
+
+
+def get_unifi_demo_path(variant: str = "with_upstream", start_ip: str = "192.168.1.20") -> UpstreamPath:
+    """Return a canned demo upstream path for a UniFi switch."""
+    if variant == "no_upstream":
+        return UpstreamPath(
+            start_ip=start_ip,
+            hops=UNIFI_DEMO_HOPS_NO_UPSTREAM,
+            edge_type="no_upstream",
+            edge_summary=f"No upstream neighbor visible from USW-Lite-16-PoE ({start_ip}) via LLDP — this switch appears to be the network edge.",
+            success=True,
+        )
+    return UpstreamPath(
+        start_ip=start_ip,
+        hops=UNIFI_DEMO_HOPS_WITH_UPSTREAM,
+        edge_type="router",
+        edge_summary="Edge router reached: UDM-Pro (192.168.1.1) — WAN wan1 via ISP gateway 198.51.100.1",
+        success=True,
+    )
+
+
 def get_demo_path(start_ip: str = "10.0.0.3") -> UpstreamPath:
     """Return a canned demo upstream path."""
+    if start_ip == "192.168.1.20":
+        return get_unifi_demo_path(variant="with_upstream", start_ip=start_ip)
     return UpstreamPath(
         start_ip=start_ip,
         hops=DEMO_HOPS,

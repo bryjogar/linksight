@@ -118,6 +118,20 @@ class HopCardWidget(QFrame):
                 f"font-size: 10px; border-radius: 3px; padding: 2px 4px;"
             )
             header.addWidget(tag)
+        elif self.hop.status == "no_upstream":
+            tag = QLabel(" NETWORK EDGE ")
+            tag.setStyleSheet(
+                f"background-color: #064e3b; color: {OK}; font-weight: 700; "
+                f"font-size: 10px; border-radius: 3px; padding: 2px 4px;"
+            )
+            header.addWidget(tag)
+        elif self.hop.status == "ambiguous":
+            tag = QLabel(" AMBIGUOUS UPLINK ")
+            tag.setStyleSheet(
+                f"background-color: #422006; color: {WARN}; font-weight: 700; "
+                f"font-size: 10px; border-radius: 3px; padding: 2px 4px;"
+            )
+            header.addWidget(tag)
         elif self.hop.device_type in ("firewall", "router"):
             tag = QLabel(f" {self.hop.device_type.upper()} EDGE ")
             tag.setStyleSheet(
@@ -138,7 +152,8 @@ class HopCardWidget(QFrame):
             up_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
             header.addWidget(up_lbl)
         elif self.hop.uplink_port and not self.hop.is_stp_root:
-            up_lbl = QLabel(f"Root Port: {self.hop.uplink_port.port_name}")
+            prefix = "Root Port" if self.hop.uplink_port.is_root_port else "Uplink"
+            up_lbl = QLabel(f"{prefix}: {self.hop.uplink_port.port_name}")
             up_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
             header.addWidget(up_lbl)
 
@@ -288,9 +303,9 @@ class HopCardWidget(QFrame):
                 center_lbl.setStyleSheet(f"color: {ACCENT}; font-family: {MONO}; font-weight: 600; font-size: 11px;")
                 path_layout.addWidget(center_lbl)
             elif downlink and not uplink:
-                root_str = " (STP Root)" if self.hop.is_stp_root else ""
+                root_str = " (STP Root)" if self.hop.is_stp_root else (" (Network Edge)" if self.hop.status == "no_upstream" else "")
                 center_lbl = QLabel(f"──▶ [ {switch_name}{root_str} ]")
-                center_lbl.setStyleSheet(f"color: {OK if self.hop.is_stp_root else ACCENT}; font-family: {MONO}; font-weight: 600; font-size: 11px;")
+                center_lbl.setStyleSheet(f"color: {OK if (self.hop.is_stp_root or self.hop.status == 'no_upstream') else ACCENT}; font-family: {MONO}; font-weight: 600; font-size: 11px;")
                 path_layout.addWidget(center_lbl)
             elif uplink and not downlink:
                 center_lbl = QLabel(f"[ {switch_name} ] ──▶")

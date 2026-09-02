@@ -522,3 +522,105 @@ def test_hop_card_widget_path_summary_modes():
     assert "ROOT / UPLINK" not in text2  # No empty uplink block
     card2.close()
 
+
+def test_upstream_widget_render_no_upstream_and_ambiguous():
+    """Verify UpstreamWidget renders no_upstream (network edge) and ambiguous edge types gracefully."""
+    from PySide6.QtWidgets import QLabel
+    from linksight.discovery.models import Hop, PortDiagnostics, UpstreamPath
+
+    app = QApplication.instance() or QApplication([])
+
+    widget = UpstreamWidget()
+    widget.show()
+
+    # 1. no_upstream: successful edge stop with NETWORK EDGE badge
+    down_port = PortDiagnostics(
+        port_id=1,
+        port_name="Port 1",
+        link_speed_mbps=1000,
+        is_downlink=True,
+        neighbor_name="Local-Host",
+    )
+    hop_edge = Hop(
+        hop_index=1,
+        hostname="USW-Lite-16-PoE",
+        mgmt_ip="192.168.1.20",
+        status="no_upstream",
+        is_stp_root=False,
+        downlink_port=down_port,
+        ports=[down_port],
+    )
+    path_no_up = UpstreamPath(
+        start_ip="192.168.1.20",
+        hops=[hop_edge],
+        edge_type="no_upstream",
+        edge_summary="No upstream neighbor visible from USW-Lite-16-PoE (192.168.1.20) via LLDP — this switch appears to be the network edge.",
+        success=True,
+    )
+    widget.show_path(path_no_up)
+
+    label_texts = [lbl.text() for lbl in widget.findChildren(QLabel)]
+    assert any("NETWORK EDGE" in t for t in label_texts)
+    assert "No upstream neighbor visible from USW-Lite-16-PoE" in widget.summary_label.text()
+    assert "USW-Lite-16-PoE" in widget.breadcrumb_bar.text()
+    # Ensure neither TIMEOUT nor UNREACHABLE is present
+    assert not any("TIMEOUT" in t for t in label_texts)
+    assert not any("UNREACHABLE" in t for t in label_texts)
+
+    # 2. ambiguous: graceful stop with AMBIGUOUS UPLINK badge and warning summary
+    hop_ambig = Hop(
+        hop_index=1,
+        hostname="USW-Lite-16-PoE",
+        mgmt_ip="192.168.1.20",
+        status="ambiguous",
+        is_stp_root=False,
+        downlink_port=down_port,
+        ports=[down_port],
+    )
+    path_ambig = UpstreamPath(
+        start_ip="192.168.1.20",
+        hops=[hop_ambig],
+        edge_type="ambiguous",
+        edge_summary="Walk stopped at hop 1 (USW-Lite-16-PoE): multiple upstream LLDP candidate neighbors found (SW-A (10.0.0.10), SW-B (10.0.0.20)) — verify upstream topology.",
+        success=False,
+    )
+    widget.show_path(path_ambig)
+
+    label_texts_ambig = [lbl.text() for lbl in widget.findChildren(QLabel)]
+    assert any("AMBIGUOUS UPLINK" in t for t in label_texts_ambig)
+    assert "multiple upstream LLDP candidate neighbors" in widget.summary_label.text()
+    assert not any("TIMEOUT" in t for t in label_texts_ambig)
+    assert not any("UNREACHABLE" in t for t in label_texts_ambig)
+
+    widget.close()
+
+
+def test_upstream_widget_render_unifi_demo_paths():
+    """Verify UpstreamWidget renders canned UniFi demo paths (with upstream and no upstream)."""
+    from PySide6.QtWidgets import QLabel
+    from linksight.discovery.demo import get_unifi_demo_path
+
+    app = QApplication.instance() or QApplication([])
+
+    widget = UpstreamWidget()
+    widget.show()
+
+    # Variant: with_upstream (2 hops: USW -> UDM router edge)
+    path_up = get_unifi_demo_path("with_upstream")
+    widget.show_path(path_up)
+    assert "UDM-Pro" in widget.summary_label.text()
+    assert "198.51.100.1" in widget.summary_label.text()
+    assert len(path_up.hops) == 2
+    lbls = [lbl.text() for lbl in widget.findChildren(QLabel)]
+    assert any("ROUTER EDGE" in t for t in lbls)
+
+    # Variant: no_upstream (1 hop: USW network edge)
+    path_no_up = get_unifi_demo_path("no_upstream")
+    widget.show_path(path_no_up)
+    assert "No upstream neighbor visible from USW-Lite-16-PoE" in widget.summary_label.text()
+    assert len(path_no_up.hops) == 1
+    lbls_no_up = [lbl.text() for lbl in widget.findChildren(QLabel)]
+    assert any("NETWORK EDGE" in t for t in lbls_no_up)
+
+    widget.close()
+

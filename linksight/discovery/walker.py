@@ -11,7 +11,14 @@ from typing import Any, Callable
 
 from .classifier import classify_device, is_edge_device
 from .models import Hop, PortDiagnostics, UpstreamPath
-from .snmp_client import SnmpClient, SnmpError, SnmpTimeoutError
+from .snmp_client import (
+    SnmpClient,
+    SnmpError,
+    SnmpTimeoutError,
+    NoSuchObject,
+    NoSuchInstance,
+    EndOfMibView,
+)
 
 # Standard SNMP OIDs
 OID_SYS_DESCR = "1.3.6.1.2.1.1.1.0"
@@ -88,8 +95,10 @@ IF_ADMIN_STATUS_MAP = {
 }
 
 
-def _format_mac(val: bytes | str) -> str:
+def _format_mac(val: bytes | str | None) -> str:
     """Format MAC address octets into aa:bb:cc:dd:ee:ff."""
+    if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)) or val is None:
+        return ""
     if isinstance(val, bytes):
         return ":".join(f"{b:02x}" for b in val)
     if isinstance(val, str):
@@ -97,7 +106,7 @@ def _format_mac(val: bytes | str) -> str:
         if len(cleaned) == 12:
             return ":".join(cleaned[i : i + 2] for i in range(0, 12, 2))
         return val
-    return str(val)
+    return ""
 
 
 def _ports_from_bitmask(bitmask: bytes) -> list[int]:
@@ -135,10 +144,18 @@ def _is_stp_root_bridge(
     if not base_bridge_addr or not stp_root_bridge_val:
         return False
 
+    if isinstance(base_bridge_addr, (NoSuchObject, NoSuchInstance, EndOfMibView)) or isinstance(
+        stp_root_bridge_val, (NoSuchObject, NoSuchInstance, EndOfMibView)
+    ):
+        return False
+
+    if not isinstance(base_bridge_addr, (bytes, str)) or not isinstance(stp_root_bridge_val, (bytes, str)):
+        return False
+
     base_mac = _format_mac(base_bridge_addr).replace(":", "").lower()
     root_mac = _format_mac(stp_root_bridge_val).replace(":", "").lower()
 
-    if base_mac and root_mac and (base_mac in root_mac or root_mac in base_mac):
+    if base_mac and root_mac and len(base_mac) >= 12 and (base_mac in root_mac or root_mac in base_mac):
         return True
 
     return False
@@ -510,13 +527,22 @@ class UpstreamWalker:
                         OID_DOT1D_STP_ROOT_BRIDGE,
                         OID_DOT1D_STP_ROOT_PORT,
                     ])
-                    bridge_addr = stp_data.get(OID_DOT1D_BASE_BRIDGE_ADDRESS)
-                    stp_root_bridge = stp_data.get(OID_DOT1D_STP_ROOT_BRIDGE)
-                    stp_root_port_val = stp_data.get(OID_DOT1D_STP_ROOT_PORT)
-                    if isinstance(stp_root_port_val, int):
-                        stp_root_port = stp_root_port_val
+                    if isinstance(stp_data, dict):
+                        b_val = stp_data.get(OID_DOT1D_BASE_BRIDGE_ADDRESS)
+                        if isinstance(b_val, (bytes, str)) and not isinstance(b_val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                            bridge_addr = b_val
+
+                        r_val = stp_data.get(OID_DOT1D_STP_ROOT_BRIDGE)
+                        if isinstance(r_val, (bytes, str)) and not isinstance(r_val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                            stp_root_bridge = r_val
+
+                        p_val = stp_data.get(OID_DOT1D_STP_ROOT_PORT)
+                        if isinstance(p_val, int) and not isinstance(p_val, bool) and not isinstance(p_val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                            stp_root_port = p_val
                 except Exception:
                     pass
+
+                stp_present = (stp_root_port is not None) or bool(bridge_addr) or bool(stp_root_bridge)
 
                 # 3. Tables: Port to ifIndex, STP Port State, Interface Speeds, Names
                 port_ifindex_map: dict[int, int] = {}
@@ -782,6 +808,48 @@ class UpstreamWalker:
                 if downlink_port_diag is not None:
                     downlink_port_diag.is_downlink = True
 
+                candidate_uplinks: list[PortDiagnostics] = []
+                if not stp_present:
+                    if progress_callback:
+                        progress_callback(
+                            f"STP MIB not available on {sys_name or curr_ip} — using LLDP neighbor direction"
+                        )
+
+                    for p in ports_list:
+                        if not p.neighbor_ip:
+                            continue
+                        if p is downlink_port_diag or p.is_downlink:
+                            continue
+                        if prev_hop_ip and p.neighbor_ip == prev_hop_ip:
+                            continue
+                        if prev_hop_name and p.neighbor_name:
+                            p_n = p.neighbor_name.strip().lower()
+                            h_n = prev_hop_name.strip().lower()
+                            if p_n == h_n or h_n in p_n or p_n in h_n:
+                                continue
+                        if hop_index == 1:
+                            if endpoint_ip and p.neighbor_ip == endpoint_ip:
+                                continue
+                            if p.neighbor_name and any(
+                                k in p.neighbor_name.lower()
+                                for k in ("local-host", "endpoint", "host", "localhost")
+                            ):
+                                continue
+                        candidate_uplinks.append(p)
+
+                    if len(candidate_uplinks) == 1:
+                        uplink_port_diag = candidate_uplinks[0]
+                        uplink_port_diag.is_uplink = True
+
+                hop_status = "ok"
+                if is_root:
+                    hop_status = "root_reached"
+                elif not stp_present:
+                    if not candidate_uplinks:
+                        hop_status = "no_upstream"
+                    elif len(candidate_uplinks) > 1:
+                        hop_status = "ambiguous"
+
                 hop = Hop(
                     hop_index=hop_index,
                     hostname=sys_name or curr_ip,
@@ -793,7 +861,7 @@ class UpstreamWalker:
                     stp_bridge_id=_format_mac(bridge_addr or ""),
                     stp_root_port_num=stp_root_port if not is_root else 0,
                     default_gateway=default_gw,
-                    status="root_reached" if is_root else "ok",
+                    status=hop_status,
                     ports=ports_list,
                     uplink_port=uplink_port_diag,
                     downlink_port=downlink_port_diag,
@@ -808,6 +876,28 @@ class UpstreamWalker:
                     gw_text = f", Gateway: {default_gw}" if default_gw else ""
                     edge_summary = f"L2 STP Root reached: {sys_name or curr_ip} ({curr_ip}){gw_text}"
                     break
+
+                if not stp_present:
+                    if not candidate_uplinks:
+                        edge_type = "no_upstream"
+                        edge_summary = (
+                            f"No upstream neighbor visible from {sys_name or curr_ip} ({curr_ip}) "
+                            f"via LLDP — this switch appears to be the network edge."
+                        )
+                        break
+                    elif len(candidate_uplinks) > 1:
+                        edge_type = "ambiguous"
+                        cand_list = [
+                            f"{p.neighbor_name} ({p.neighbor_ip})" if p.neighbor_name else str(p.neighbor_ip)
+                            for p in candidate_uplinks
+                        ]
+                        cand_desc = ", ".join(cand_list)
+                        edge_summary = (
+                            f"Walk stopped at hop {hop_index} ({sys_name or curr_ip}): "
+                            f"multiple upstream LLDP candidate neighbors found ({cand_desc}) — "
+                            f"verify upstream topology."
+                        )
+                        break
 
                 # If switch is NOT root: look up neighbor on the root port ONLY
                 if not uplink_port_diag or not uplink_port_diag.neighbor_ip:
@@ -827,7 +917,7 @@ class UpstreamWalker:
             finally:
                 client.close()
 
-        success = bool(hops and hops[-1].status in ("ok", "root_reached", "router_reached"))
+        success = bool(hops and hops[-1].status in ("ok", "root_reached", "router_reached", "no_upstream"))
         return UpstreamPath(
             start_ip=start_ip,
             hops=hops,

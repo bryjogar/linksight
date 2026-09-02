@@ -43,6 +43,8 @@ ROUTER_KEYWORDS = [
     "cisco 29",
     "cisco 39",
     "cisco 4",
+    "dream machine",
+    "udm",
 ]
 
 SWITCH_KEYWORDS = [
