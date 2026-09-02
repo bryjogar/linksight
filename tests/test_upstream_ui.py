@@ -18,7 +18,7 @@ from linksight.ui.upstream_widget import UpstreamWidget, HopCardWidget
 
 
 def test_upstream_widget_render_demo_path():
-    """Verify UpstreamWidget correctly renders the multi-hop demo chain."""
+    """Verify UpstreamWidget correctly renders the multi-hop demo chain with WAN handoff."""
     app = QApplication.instance() or QApplication([])
 
     widget = UpstreamWidget()
@@ -29,17 +29,22 @@ def test_upstream_widget_render_demo_path():
 
     assert widget.summary_label.text() != ""
     assert "FW-Edge01" in widget.summary_label.text()
+    assert "203.0.113.1" in widget.summary_label.text()
+    assert "wan1" in widget.summary_label.text()
     assert not widget.breadcrumb_bar.isHidden()
     assert "Access-SW2" in widget.breadcrumb_bar.text()
     assert "Core-SW1" in widget.breadcrumb_bar.text()
+    assert "203.0.113.1" in widget.breadcrumb_bar.text()
 
     # Verify cards in layout
     card_count = 0
+    cards: list[HopCardWidget] = []
     for i in range(widget.cards_layout.count()):
         item = widget.cards_layout.itemAt(i)
         w = item.widget()
         if isinstance(w, HopCardWidget):
             card_count += 1
+            cards.append(w)
             assert w.hop is not None
             assert w.expanded is True
             # Test toggle
@@ -51,10 +56,66 @@ def test_upstream_widget_render_demo_path():
             assert not w.body.isHidden()
 
     assert card_count == 3
+    # Verify FW-Edge01 card has WAN handoff block
+    fw_card = cards[2]
+    assert fw_card.hop.hostname == "FW-Edge01"
+    assert fw_card.hop.wan_interface is not None
+    assert fw_card.hop.wan_interface.port_name == "wan1"
+    assert fw_card.hop.isp_gateway == "203.0.113.1"
+    assert fw_card.hop.lan_interface is not None
+    assert fw_card.hop.lan_interface.port_name == "lan"
 
     # Test clear
     widget.clear()
     assert widget.breadcrumb_bar.isVisible() is False
+
+
+def test_hop_card_widget_wan_handoff():
+    """Verify HopCardWidget renders WAN handoff and interface table with mixed statuses."""
+    from PySide6.QtWidgets import QFrame
+    from linksight.discovery.models import Hop, PortDiagnostics
+
+    app = QApplication.instance() or QApplication([])
+
+    wan_port = PortDiagnostics(
+        port_id=1,
+        port_name="wan1",
+        link_speed_mbps=1000,
+        oper_status="up",
+        is_uplink=True,
+    )
+    lan_port = PortDiagnostics(
+        port_id=2,
+        port_name="lan",
+        link_speed_mbps=1000,
+        oper_status="up",
+        is_downlink=True,
+    )
+    dmz_port = PortDiagnostics(
+        port_id=3,
+        port_name="dmz",
+        link_speed_mbps=100,
+        oper_status="down",
+    )
+
+    hop = Hop(
+        hop_index=1,
+        hostname="FW-Core",
+        mgmt_ip="192.168.1.1",
+        device_type="firewall",
+        status="router_reached",
+        isp_gateway="198.51.100.1",
+        wan_interface=wan_port,
+        lan_interface=lan_port,
+        ports=[wan_port, lan_port, dmz_port],
+    )
+
+    card = HopCardWidget(hop)
+    card.show()
+
+    wan_frame = card.findChild(QFrame, "wan_handoff")
+    assert wan_frame is not None
+    card.close()
 
 
 def test_switch_info_widget_upstream_button():

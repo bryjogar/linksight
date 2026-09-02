@@ -34,12 +34,17 @@ from linksight.discovery.walker import (
     OID_IF_DESCR,
     OID_IF_HIGH_SPEED,
     OID_IF_SPEED,
+    OID_IF_OPER_STATUS,
+    OID_IF_ADMIN_STATUS,
     OID_DOT1Q_PVID,
     OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS,
     OID_LLDP_REM_PORT_ID,
     OID_LLDP_REM_SYS_NAME,
     OID_LLDP_REM_MAN_ADDR_TABLE,
     OID_IP_ROUTE_NEXT_HOP_DEFAULT,
+    OID_IP_ROUTE_IF_INDEX_DEFAULT,
+    OID_IP_ROUTE_TABLE,
+    OID_IP_NET_TO_MEDIA_TABLE,
 )
 
 
@@ -256,6 +261,153 @@ def test_walker_multi_hop_to_firewall_edge():
     assert result.hops[1].hostname == "Core-SW1"
     assert result.hops[1].is_stp_root is True
     assert result.hops[1].default_gateway == fw_ip
+
+
+def test_walker_firewall_edge_snmp_pass():
+    """Verify full SNMP pass on edge firewall (interfaces, default route, WAN/LAN mapping)."""
+    access_ip = "10.0.0.3"
+    core_ip = "10.0.0.2"
+    fw_ip = "10.0.0.1"
+
+    device_mibs = {
+        access_ip: {
+            OID_SYS_DESCR: "Cisco Catalyst 2960L",
+            OID_SYS_NAME: "Access-SW2",
+            OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("aabbcc001122"),
+            OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000001a2b3c4d5e"),
+            OID_DOT1D_STP_ROOT_PORT: 24,
+            f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+            f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
+            f"{OID_IF_NAME}.24": "Gi1/0/24",
+            f"{OID_IF_HIGH_SPEED}.24": 1000,
+            f"{OID_DOT1Q_PVID}.24": 100,
+            f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Core-SW1",
+            f"{OID_LLDP_REM_PORT_ID}.0.24.1": "Gi0/24",
+            f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.24.1.1.4.10.0.0.2": 1,
+        },
+        core_ip: {
+            OID_SYS_DESCR: "Cisco Catalyst 2960X",
+            OID_SYS_NAME: "Core-SW1",
+            OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001a2b3c4d5e"),
+            OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000000000000001"),  # Firewall is root in STP
+            OID_DOT1D_STP_ROOT_PORT: 1,
+            f"{OID_DOT1D_BASE_PORT_IFINDEX}.1": 1,
+            f"{OID_DOT1D_STP_PORT_STATE}.1": 5,
+            f"{OID_IF_NAME}.1": "Gi0/1",
+            f"{OID_IF_HIGH_SPEED}.1": 1000,
+            f"{OID_DOT1Q_PVID}.1": 100,
+            f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "FW-Edge01",
+            f"{OID_LLDP_REM_PORT_ID}.0.1.1": "port1",
+            f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.1.1.1.4.10.0.0.1": 1,
+        },
+        fw_ip: {
+            OID_SYS_DESCR: "FortiGate-60F v7.2.5,build1517,230612 (GA.M)",
+            OID_SYS_NAME: "FW-Edge01",
+            OID_SYS_OBJECT_ID: "1.3.6.1.4.1.12356.101.1",
+            # Interfaces (ifTable / ifXTable)
+            f"{OID_IF_NAME}.2": "lan",
+            f"{OID_IF_HIGH_SPEED}.2": 1000,
+            f"{OID_IF_OPER_STATUS}.2": 1,
+            f"{OID_IF_ADMIN_STATUS}.2": 1,
+            f"{OID_IF_NAME}.3": "dmz",
+            f"{OID_IF_OPER_STATUS}.3": 2,
+            f"{OID_IF_ADMIN_STATUS}.3": 2,
+            f"{OID_IF_NAME}.5": "wan1",
+            f"{OID_IF_HIGH_SPEED}.5": 1000,
+            f"{OID_IF_OPER_STATUS}.5": 1,
+            f"{OID_IF_ADMIN_STATUS}.5": 1,
+            # Default route (0.0.0.0/0 -> ifIndex 5, next hop 203.0.113.1)
+            OID_IP_ROUTE_NEXT_HOP_DEFAULT: "203.0.113.1",
+            OID_IP_ROUTE_IF_INDEX_DEFAULT: 5,
+            # ARP table entry for incoming Core switch (10.0.0.2)
+            f"{OID_IP_NET_TO_MEDIA_TABLE}.1.2.10.0.0.2": 2,
+            f"{OID_IP_NET_TO_MEDIA_TABLE}.3.2.10.0.0.2": "10.0.0.2",
+        },
+    }
+
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=access_ip)
+
+    assert result.success is True
+    assert len(result.hops) == 3, f"Expected 3 hops, got {len(result.hops)}"
+
+    # Check edge hop (FW-Edge01)
+    hop = result.hops[2]
+    assert hop.mgmt_ip == fw_ip
+    assert hop.hostname == "FW-Edge01"
+    assert hop.device_type == "firewall"
+    assert hop.status == "router_reached"
+    assert result.edge_type == "firewall"
+
+    # WAN interface identification
+    assert hop.wan_interface is not None
+    assert hop.wan_interface.port_name == "wan1"
+    assert hop.wan_interface.link_speed_mbps == 1000
+    assert hop.wan_interface.oper_status == "up"
+    assert hop.wan_interface.is_uplink is True
+    assert hop.isp_gateway == "203.0.113.1"
+
+    # LAN interface identification
+    assert hop.lan_interface is not None
+    assert hop.lan_interface.port_name == "lan"
+    assert hop.lan_interface.is_downlink is True
+    assert hop.lan_interface.neighbor_ip == core_ip
+
+    # Full interface list
+    assert len(hop.ports) == 3
+    port_names = [p.port_name for p in hop.ports]
+    assert "wan1" in port_names
+    assert "lan" in port_names
+    assert "dmz" in port_names
+
+    # Summary
+    assert "FW-Edge01" in result.edge_summary
+    assert "203.0.113.1" in result.edge_summary
+    assert "wan1" in result.edge_summary
+
+
+def test_walker_firewall_edge_degradation():
+    """Verify graceful fallback when firewall refuses or times out on IF/route tables."""
+    access_ip = "10.0.0.3"
+    fw_ip = "10.0.0.1"
+
+    device_mibs = {
+        access_ip: {
+            OID_SYS_DESCR: "Cisco Catalyst 2960L",
+            OID_SYS_NAME: "Access-SW",
+            OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("aabbcc001122"),
+            OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000001a2b3c4d5e"),
+            OID_DOT1D_STP_ROOT_PORT: 1,
+            f"{OID_DOT1D_BASE_PORT_IFINDEX}.1": 1,
+            f"{OID_DOT1D_STP_PORT_STATE}.1": 5,
+            f"{OID_IF_NAME}.1": "Gi0/1",
+            f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "FW-Locked",
+            f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.1.1.1.4.10.0.0.1": 1,
+        },
+        fw_ip: {
+            # Answers sysDescr/sysName/sysObjectID, but no IF or route tables
+            OID_SYS_DESCR: "FortiGate-100F v7.0.0",
+            OID_SYS_NAME: "FW-Locked",
+            OID_SYS_OBJECT_ID: "1.3.6.1.4.1.12356.101.1",
+        },
+    }
+
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=access_ip)
+
+    assert result.success is True
+    assert len(result.hops) == 2
+    fw_hop = result.hops[1]
+    assert fw_hop.mgmt_ip == fw_ip
+    assert fw_hop.hostname == "FW-Locked"
+    assert fw_hop.device_type == "firewall"
+    assert fw_hop.status == "router_reached"
+    assert result.edge_type == "firewall"
+    assert fw_hop.wan_interface is None
+    assert fw_hop.isp_gateway is None
+    assert "Edge firewall reached: FW-Locked (10.0.0.1)" in result.edge_summary
 
 
 def test_walker_unreachable_next_hop():

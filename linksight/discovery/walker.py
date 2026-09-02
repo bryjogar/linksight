@@ -29,6 +29,8 @@ OID_DOT1D_STP_PORT_STATE = "1.3.6.1.2.1.17.2.15.1.3"
 # IF-MIB (RFC 2863)
 OID_IF_DESCR = "1.3.6.1.2.1.2.2.1.2"
 OID_IF_SPEED = "1.3.6.1.2.1.2.2.1.5"
+OID_IF_ADMIN_STATUS = "1.3.6.1.2.1.2.2.1.7"
+OID_IF_OPER_STATUS = "1.3.6.1.2.1.2.2.1.8"
 OID_IF_NAME = "1.3.6.1.2.1.31.1.1.1.1"
 OID_IF_HIGH_SPEED = "1.3.6.1.2.1.31.1.1.1.15"
 
@@ -50,8 +52,15 @@ OID_CDP_CACHE_DEVICE_ID = "1.3.6.1.4.1.9.9.23.1.2.1.1.6"
 OID_CDP_CACHE_DEVICE_PORT = "1.3.6.1.4.1.9.9.23.1.2.1.1.7"
 OID_CDP_CACHE_PLATFORM = "1.3.6.1.4.1.9.9.23.1.2.1.1.8"
 
-# IP Route Table (Default Gateway)
+# IP Route Table (Default Gateway & Routes - RFC 1213 / RFC 2096)
+OID_IP_ROUTE_IF_INDEX_DEFAULT = "1.3.6.1.2.1.4.21.1.2.0.0.0.0"
 OID_IP_ROUTE_NEXT_HOP_DEFAULT = "1.3.6.1.2.1.4.21.1.7.0.0.0.0"
+OID_IP_ROUTE_TABLE = "1.3.6.1.2.1.4.21.1"
+
+# IP Address & Net-to-Media / ARP Tables (RFC 1213 / RFC 2011)
+OID_IP_ADDR_TABLE_IF_INDEX = "1.3.6.1.2.1.4.20.1.2"
+OID_IP_ADDR_TABLE_NET_MASK = "1.3.6.1.2.1.4.20.1.3"
+OID_IP_NET_TO_MEDIA_TABLE = "1.3.6.1.2.1.4.22.1"
 
 STP_STATE_MAP = {
     1: "disabled",
@@ -60,6 +69,22 @@ STP_STATE_MAP = {
     4: "learning",
     5: "forwarding",
     6: "broken",
+}
+
+IF_OPER_STATUS_MAP = {
+    1: "up",
+    2: "down",
+    3: "testing",
+    4: "unknown",
+    5: "dormant",
+    6: "notPresent",
+    7: "lowerLayerDown",
+}
+
+IF_ADMIN_STATUS_MAP = {
+    1: "up",
+    2: "down",
+    3: "testing",
 }
 
 
@@ -199,6 +224,249 @@ class UpstreamWalker:
 
                 # Check if device is a router/firewall edge device
                 if is_edge_device(device_type):
+                    if progress_callback:
+                        progress_callback(f"Querying edge {device_type} {sys_name or curr_ip} interfaces & routes…")
+
+                    # Edge SNMP pass: query IF-MIB and route table for WAN/LAN details
+                    if_names: dict[int, str] = {}
+                    if_descrs: dict[int, str] = {}
+                    if_speeds: dict[int, int] = {}
+                    if_oper: dict[int, int] = {}
+                    if_admin: dict[int, int] = {}
+
+                    try:
+                        for oid, val in client.walk(OID_IF_NAME):
+                            idx = _parse_last_oid_index(oid)
+                            if idx is not None and val:
+                                if_names[idx] = str(val)
+                    except Exception:
+                        pass
+
+                    try:
+                        for oid, val in client.walk(OID_IF_DESCR):
+                            idx = _parse_last_oid_index(oid)
+                            if idx is not None and val:
+                                if_descrs[idx] = str(val)
+                    except Exception:
+                        pass
+
+                    try:
+                        for oid, val in client.walk(OID_IF_HIGH_SPEED):
+                            idx = _parse_last_oid_index(oid)
+                            if idx is not None and isinstance(val, int) and val > 0:
+                                if_speeds[idx] = val
+                    except Exception:
+                        pass
+
+                    try:
+                        for oid, val in client.walk(OID_IF_SPEED):
+                            idx = _parse_last_oid_index(oid)
+                            if idx is not None and idx not in if_speeds and isinstance(val, int) and val > 0:
+                                if_speeds[idx] = val // 1_000_000
+                    except Exception:
+                        pass
+
+                    try:
+                        for oid, val in client.walk(OID_IF_OPER_STATUS):
+                            idx = _parse_last_oid_index(oid)
+                            if idx is not None and isinstance(val, int):
+                                if_oper[idx] = val
+                    except Exception:
+                        pass
+
+                    try:
+                        for oid, val in client.walk(OID_IF_ADMIN_STATUS):
+                            idx = _parse_last_oid_index(oid)
+                            if idx is not None and isinstance(val, int):
+                                if_admin[idx] = val
+                    except Exception:
+                        pass
+
+                    # Default route lookup (0.0.0.0/0 next-hop and outgoing ifIndex)
+                    isp_gateway: str | None = None
+                    default_route_if_index: int | None = None
+
+                    try:
+                        route_data = client.get([OID_IP_ROUTE_NEXT_HOP_DEFAULT, OID_IP_ROUTE_IF_INDEX_DEFAULT])
+                        gw_val = route_data.get(OID_IP_ROUTE_NEXT_HOP_DEFAULT)
+                        if_idx_val = route_data.get(OID_IP_ROUTE_IF_INDEX_DEFAULT)
+
+                        if gw_val and isinstance(gw_val, (str, bytes)):
+                            ip_str = gw_val if isinstance(gw_val, str) else ".".join(str(b) for b in gw_val)
+                            if ip_str and ip_str != "0.0.0.0":
+                                isp_gateway = ip_str
+                        if isinstance(if_idx_val, int) and if_idx_val > 0:
+                            default_route_if_index = if_idx_val
+                    except Exception:
+                        pass
+
+                    # Fallback: walk ipRouteTable if exact GET was not conclusive
+                    if isp_gateway is None or default_route_if_index is None:
+                        try:
+                            for oid, val in client.walk(OID_IP_ROUTE_TABLE):
+                                if oid.endswith(".0.0.0.0"):
+                                    if ".4.21.1.2." in oid or oid.startswith("1.3.6.1.2.1.4.21.1.2."):
+                                        if isinstance(val, int) and val > 0 and default_route_if_index is None:
+                                            default_route_if_index = val
+                                    elif ".4.21.1.7." in oid or oid.startswith("1.3.6.1.2.1.4.21.1.7."):
+                                        if val and isinstance(val, (str, bytes)) and isp_gateway is None:
+                                            ip_str = val if isinstance(val, str) else ".".join(str(b) for b in val)
+                                            if ip_str and ip_str != "0.0.0.0":
+                                                isp_gateway = ip_str
+                        except Exception:
+                            pass
+
+                    # Previous hop info for LAN interface identification
+                    prev_hop = hops[-1] if hops else None
+                    prev_hop_ip = prev_hop.mgmt_ip if prev_hop else ""
+
+                    # LAN interface identification
+                    lan_if_index: int | None = None
+
+                    # 1. LLDP neighbor check
+                    if prev_hop_ip:
+                        try:
+                            for oid, val in client.walk(OID_LLDP_REM_MAN_ADDR_TABLE):
+                                parts = oid.strip(".").split(".")
+                                if len(parts) >= 10:
+                                    p_cand = int(parts[-8]) if parts[-8].isdigit() else None
+                                    subtype = int(parts[-6]) if parts[-6].isdigit() else None
+                                    count = int(parts[-5]) if parts[-5].isdigit() else None
+                                    if subtype == 1 and count == 4 and p_cand is not None:
+                                        ip_str = ".".join(parts[-4:])
+                                        if ip_str == prev_hop_ip:
+                                            lan_if_index = p_cand
+                                            break
+                        except Exception:
+                            pass
+
+                    # 2. ARP table check (ipNetToMedia)
+                    if lan_if_index is None and prev_hop_ip:
+                        try:
+                            for oid, val in client.walk(OID_IP_NET_TO_MEDIA_TABLE):
+                                parts = oid.strip(".").split(".")
+                                if len(parts) >= 6 and ".".join(parts[-4:]) == prev_hop_ip:
+                                    cand_idx = int(parts[-5]) if parts[-5].isdigit() else None
+                                    if cand_idx is not None:
+                                        lan_if_index = cand_idx
+                                        break
+                                elif isinstance(val, (str, bytes)):
+                                    ip_str = val if isinstance(val, str) else ".".join(str(b) for b in val)
+                                    if ip_str == prev_hop_ip:
+                                        cand_idx = _parse_last_oid_index(oid)
+                                        if cand_idx is not None:
+                                            lan_if_index = cand_idx
+                                            break
+                        except Exception:
+                            pass
+
+                    # 3. Subnet match check via ipAddrTable
+                    if lan_if_index is None and prev_hop_ip:
+                        try:
+                            import ipaddress
+                            ip_ifindex: dict[str, int] = {}
+                            ip_mask: dict[str, str] = {}
+                            for oid, val in client.walk(OID_IP_ADDR_TABLE_IF_INDEX):
+                                parts = oid.strip(".").split(".")
+                                if len(parts) >= 4 and isinstance(val, int):
+                                    ip_str = ".".join(parts[-4:])
+                                    ip_ifindex[ip_str] = val
+                            for oid, val in client.walk(OID_IP_ADDR_TABLE_NET_MASK):
+                                parts = oid.strip(".").split(".")
+                                if len(parts) >= 4:
+                                    mask_str = val if isinstance(val, str) else ".".join(str(b) for b in val) if isinstance(val, bytes) else str(val)
+                                    ip_str = ".".join(parts[-4:])
+                                    ip_mask[ip_str] = mask_str
+
+                            prev_ip_obj = ipaddress.IPv4Address(prev_hop_ip)
+                            for if_ip, if_idx in ip_ifindex.items():
+                                mask = ip_mask.get(if_ip, "255.255.255.0")
+                                try:
+                                    net = ipaddress.IPv4Network(f"{if_ip}/{mask}", strict=False)
+                                    if prev_ip_obj in net and if_idx != default_route_if_index:
+                                        lan_if_index = if_idx
+                                        break
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                    # 4. Fallback name-based LAN interface check
+                    if lan_if_index is None:
+                        for idx, name in if_names.items():
+                            if idx != default_route_if_index and name.lower() in ("lan", "internal", "lan1", "trust", "inside"):
+                                lan_if_index = idx
+                                break
+                        if lan_if_index is None:
+                            for idx, desc in if_descrs.items():
+                                if idx != default_route_if_index and desc.lower() in ("lan", "internal", "lan1", "trust", "inside"):
+                                    lan_if_index = idx
+                                    break
+
+                    # Build edge port diagnostics list
+                    all_indices = sorted(set(if_names.keys()) | set(if_descrs.keys()) | set(if_speeds.keys()) | set(if_oper.keys()) | set(if_admin.keys()))
+                    if default_route_if_index is not None and default_route_if_index not in all_indices:
+                        all_indices.append(default_route_if_index)
+                        all_indices.sort()
+
+                    ports_list: list[PortDiagnostics] = []
+                    wan_diag: PortDiagnostics | None = None
+                    lan_diag: PortDiagnostics | None = None
+
+                    for idx in all_indices:
+                        p_name = if_names.get(idx) or if_descrs.get(idx) or f"port{idx}"
+                        p_speed = if_speeds.get(idx)
+                        p_oper_num = if_oper.get(idx)
+                        p_oper = IF_OPER_STATUS_MAP.get(p_oper_num, "unknown") if p_oper_num is not None else "unknown"
+                        p_admin_num = if_admin.get(idx)
+                        p_admin = IF_ADMIN_STATUS_MAP.get(p_admin_num, "unknown") if p_admin_num is not None else "unknown"
+
+                        is_wan = bool(default_route_if_index is not None and idx == default_route_if_index)
+                        is_lan = bool(lan_if_index is not None and idx == lan_if_index)
+
+                        n_name = ""
+                        n_ip = ""
+                        n_port = ""
+
+                        if is_wan:
+                            n_name = "ISP Gateway" if isp_gateway else ""
+                            n_ip = isp_gateway or ""
+                        elif is_lan and prev_hop:
+                            n_name = prev_hop.hostname
+                            n_ip = prev_hop.mgmt_ip
+                            if prev_hop.uplink_port:
+                                n_port = prev_hop.uplink_port.port_name
+
+                        diag = PortDiagnostics(
+                            port_id=idx,
+                            port_name=p_name,
+                            link_speed_mbps=p_speed,
+                            stp_state="unknown",
+                            oper_status=p_oper,
+                            admin_status=p_admin,
+                            is_uplink=is_wan,
+                            is_downlink=is_lan,
+                            neighbor_name=n_name,
+                            neighbor_ip=n_ip,
+                            neighbor_port=n_port,
+                        )
+                        ports_list.append(diag)
+                        if is_wan:
+                            wan_diag = diag
+                        if is_lan:
+                            lan_diag = diag
+
+                    # If default_route_if_index didn't match any port but isp_gateway was found and we have a wan-named interface
+                    if wan_diag is None:
+                        for p in ports_list:
+                            if "wan" in p.port_name.lower():
+                                wan_diag = p
+                                p.is_uplink = True
+                                if isp_gateway and not p.neighbor_ip:
+                                    p.neighbor_ip = isp_gateway
+                                    p.neighbor_name = "ISP Gateway"
+                                break
+
                     hop = Hop(
                         hop_index=hop_index,
                         hostname=sys_name or curr_ip,
@@ -206,12 +474,29 @@ class UpstreamWalker:
                         sys_descr=sys_descr,
                         device_type=device_type,
                         is_stp_root=False,
+                        default_gateway=isp_gateway,
                         status="router_reached",
+                        ports=ports_list,
+                        uplink_port=wan_diag,
+                        downlink_port=lan_diag,
                         response_time_ms=(time.perf_counter() - t0) * 1000,
+                        isp_gateway=isp_gateway,
+                        wan_interface=wan_diag,
+                        lan_interface=lan_diag,
                     )
                     hops.append(hop)
                     edge_type = device_type
-                    edge_summary = f"Edge {device_type} reached: {sys_name or curr_ip} ({curr_ip})"
+                    if wan_diag and isp_gateway:
+                        edge_summary = (
+                            f"Edge {device_type} reached: {sys_name or curr_ip} ({curr_ip}) — "
+                            f"WAN {wan_diag.port_name} via ISP gateway {isp_gateway}"
+                        )
+                    elif isp_gateway:
+                        edge_summary = f"Edge {device_type} reached: {sys_name or curr_ip} ({curr_ip}) — ISP gateway {isp_gateway}"
+                    elif wan_diag:
+                        edge_summary = f"Edge {device_type} reached: {sys_name or curr_ip} ({curr_ip}) — WAN {wan_diag.port_name}"
+                    else:
+                        edge_summary = f"Edge {device_type} reached: {sys_name or curr_ip} ({curr_ip})"
                     break
 
                 # 2. Bridge & STP Information

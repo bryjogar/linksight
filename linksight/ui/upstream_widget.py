@@ -97,7 +97,11 @@ class HopCardWidget(QFrame):
             )
             header.addWidget(tag)
 
-        if self.hop.uplink_port and not self.hop.is_stp_root:
+        if self.hop.wan_interface and not self.hop.is_stp_root:
+            up_lbl = QLabel(f"WAN: {self.hop.wan_interface.port_name}")
+            up_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
+            header.addWidget(up_lbl)
+        elif self.hop.uplink_port and not self.hop.is_stp_root:
             up_lbl = QLabel(f"Root Port: {self.hop.uplink_port.port_name}")
             up_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
             header.addWidget(up_lbl)
@@ -131,7 +135,55 @@ class HopCardWidget(QFrame):
             desc_lbl.setWordWrap(True)
             body_layout.addWidget(desc_lbl)
 
-        if self.hop.default_gateway:
+        # WAN Handoff Block (Prominent WAN Interface + Speed + Oper Status + ISP Gateway)
+        if self.hop.wan_interface or self.hop.isp_gateway:
+            wan_frame = QFrame()
+            wan_frame.setObjectName("wan_handoff")
+            wan_frame.setStyleSheet(
+                f"QFrame#wan_handoff {{ background-color: {BG_INPUT}; border: 1px solid {BORDER_STRONG}; border-radius: 4px; padding: 4px 8px; }}"
+            )
+            wan_layout = QHBoxLayout(wan_frame)
+            wan_layout.setContentsMargins(6, 4, 6, 4)
+            wan_layout.setSpacing(14)
+
+            badge_wan = QLabel("WAN HANDOFF")
+            badge_wan.setStyleSheet(f"color: {ACCENT}; font-weight: 700; font-size: 11px; font-family: {MONO};")
+            wan_layout.addWidget(badge_wan)
+
+            wan_name = self.hop.wan_interface.port_name if self.hop.wan_interface else "WAN"
+            wan_lbl = QLabel(f"Interface: <span style='color:{FG}; font-family:{MONO}; font-weight:600;'>{wan_name}</span>")
+            wan_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
+            wan_layout.addWidget(wan_lbl)
+
+            if self.hop.wan_interface and self.hop.wan_interface.link_speed_mbps is not None:
+                spd = self.hop.wan_interface.link_speed_mbps
+                spd_str = f"{spd // 1000} Gbps" if spd >= 1000 and spd % 1000 == 0 else f"{spd} Mbps"
+                spd_color = OK if spd >= 1000 else WARN
+                spd_lbl = QLabel(f"Speed: <span style='color:{spd_color}; font-family:{MONO}; font-weight:600;'>{spd_str}</span>")
+            else:
+                spd_lbl = QLabel("Speed: <span style='color:#808080;'>—</span>")
+            spd_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
+            wan_layout.addWidget(spd_lbl)
+
+            oper_status = self.hop.wan_interface.oper_status if (self.hop.wan_interface and self.hop.wan_interface.oper_status != "unknown") else ("up" if self.hop.wan_interface else "unknown")
+            if oper_status.lower() == "up":
+                oper_color = OK
+            elif oper_status.lower() == "down":
+                oper_color = DANGER
+            else:
+                oper_color = WARN
+            oper_lbl = QLabel(f"Status: <span style='color:{oper_color}; font-family:{MONO}; font-weight:600;'>{oper_status.upper()}</span>")
+            oper_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
+            wan_layout.addWidget(oper_lbl)
+
+            if self.hop.isp_gateway:
+                gw_lbl = QLabel(f"ISP Gateway: <span style='color:{ACCENT}; font-family:{MONO}; font-weight:700; font-size:12px;'>{self.hop.isp_gateway}</span>")
+                gw_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
+                wan_layout.addWidget(gw_lbl)
+
+            wan_layout.addStretch(1)
+            body_layout.addWidget(wan_frame)
+        elif self.hop.default_gateway:
             gw_lbl = QLabel(f"Default Gateway (L3): {self.hop.default_gateway}")
             gw_lbl.setStyleSheet(f"color: {ACCENT}; font-size: 11px; font-weight: 600; font-family: {MONO};")
             body_layout.addWidget(gw_lbl)
@@ -149,7 +201,7 @@ class HopCardWidget(QFrame):
                 "PORT",
                 "PVID",
                 "ALLOWED VLANS",
-                "STP STATE",
+                "STP / STATUS",
                 "LINK SPEED",
                 "CONNECTED NEIGHBOR",
             ])
@@ -166,12 +218,20 @@ class HopCardWidget(QFrame):
                 p_text = port.port_name or f"Port {port.port_id}"
                 if port.is_root_port:
                     p_text += " [ROOT/UPLINK]"
+                elif self.hop.wan_interface and (port == self.hop.wan_interface or port.port_id == self.hop.wan_interface.port_id):
+                    p_text += " [WAN/UPLINK]"
+                elif self.hop.lan_interface and (port == self.hop.lan_interface or port.port_id == self.hop.lan_interface.port_id):
+                    p_text += " [LAN/DOWNLINK]"
+                elif port.is_uplink:
+                    p_text += " [UPLINK]"
                 elif port.is_downlink:
                     p_text += " [DOWNLINK]"
                 it_port = QTableWidgetItem(p_text)
                 it_port.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                if port.is_root_port or port.is_uplink:
+                if port.is_root_port or port.is_uplink or (self.hop.wan_interface and port.port_id == self.hop.wan_interface.port_id):
                     it_port.setForeground(Qt.GlobalColor.cyan)
+                elif self.hop.lan_interface and port.port_id == self.hop.lan_interface.port_id:
+                    it_port.setForeground(Qt.GlobalColor.green)
                 table.setItem(row_idx, 0, it_port)
 
                 # 2. PVID
@@ -186,16 +246,31 @@ class HopCardWidget(QFrame):
                 it_vlans.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 table.setItem(row_idx, 2, it_vlans)
 
-                # 4. STP State
+                # 4. STP / Oper Status
                 st = port.stp_state.upper()
-                it_stp = QTableWidgetItem(st)
-                it_stp.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
-                if port.is_forwarding:
-                    it_stp.setForeground(Qt.GlobalColor.green)
-                elif st in ("BLOCKING", "BROKEN"):
-                    it_stp.setForeground(Qt.GlobalColor.red)
+                if st != "UNKNOWN":
+                    status_text = st
+                    if port.is_forwarding:
+                        color = Qt.GlobalColor.green
+                    elif st in ("BLOCKING", "BROKEN"):
+                        color = Qt.GlobalColor.red
+                    else:
+                        color = Qt.GlobalColor.yellow
+                elif port.oper_status and port.oper_status.lower() != "unknown":
+                    status_text = port.oper_status.upper()
+                    if port.oper_status.lower() == "up":
+                        color = Qt.GlobalColor.green
+                    elif port.oper_status.lower() == "down":
+                        color = Qt.GlobalColor.red
+                    else:
+                        color = Qt.GlobalColor.yellow
                 else:
-                    it_stp.setForeground(Qt.GlobalColor.yellow)
+                    status_text = "—"
+                    color = Qt.GlobalColor.gray
+
+                it_stp = QTableWidgetItem(status_text)
+                it_stp.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                it_stp.setForeground(color)
                 table.setItem(row_idx, 3, it_stp)
 
                 # 5. Link Speed
@@ -323,9 +398,9 @@ class UpstreamWidget(QWidget):
         trail = ["Endpoint"]
         for hop in path.hops:
             trail.append(f"{hop.hostname or hop.mgmt_ip}")
-        if path.edge_type in ("firewall", "router") and path.hops and path.hops[-1].device_type in ("firewall", "router"):
-            pass  # already in hops
-        elif path.hops and path.hops[-1].default_gateway:
+        if path.hops and path.hops[-1].isp_gateway:
+            trail.append(f"ISP Gateway ({path.hops[-1].isp_gateway})")
+        elif path.hops and path.hops[-1].default_gateway and not (path.edge_type in ("firewall", "router") and path.hops[-1].device_type in ("firewall", "router")):
             trail.append(f"Gateway ({path.hops[-1].default_gateway})")
 
         self.breadcrumb_bar.setText(" ──▶ ".join(trail))

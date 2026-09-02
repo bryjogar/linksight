@@ -26,6 +26,8 @@ class PortDiagnostics:
     neighbor_port: str = ""
     is_uplink: bool = False
     is_downlink: bool = False
+    oper_status: str = "unknown"  # "up", "down", "testing", "unknown", "dormant", "notPresent", "lowerLayerDown"
+    admin_status: str = "unknown"  # "up", "down", "testing"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -40,6 +42,10 @@ class PortDiagnostics:
     @property
     def is_forwarding(self) -> bool:
         return self.stp_state.lower() == "forwarding"
+
+    @property
+    def is_oper_up(self) -> bool:
+        return self.oper_status.lower() == "up"
 
 
 @dataclass
@@ -63,6 +69,9 @@ class Hop:
     uplink_port: PortDiagnostics | None = None
     downlink_port: PortDiagnostics | None = None
     response_time_ms: float | None = None
+    isp_gateway: str | None = None
+    wan_interface: PortDiagnostics | None = None
+    lan_interface: PortDiagnostics | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
