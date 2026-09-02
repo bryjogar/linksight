@@ -16,7 +16,7 @@ from ..capture.interfaces import NetInterface, list_interfaces, preferred_interf
 from ..parse.model import NeighborDevice
 
 
-def normalize_mac(mac: str) -> str | None:
+def normalize_mac(mac: str | bytes | None) -> str | None:
     """Normalize a MAC address to 12 lowercase hexadecimal digits without separators.
 
     Returns None if input is empty, None, or does not represent a valid 6-byte MAC.
@@ -25,9 +25,17 @@ def normalize_mac(mac: str) -> str | None:
       - 00-1a-2b-3c-4d-5e
       - 001a.2b3c.4d5e
       - 001a2b3c4d5e
+      - 6 raw bytes
     """
-    if not mac:
+    if not mac or not isinstance(mac, (str, bytes)):
         return None
+    if isinstance(mac, bytes):
+        if len(mac) == 6:
+            return mac.hex().lower()
+        try:
+            mac = mac.decode("utf-8", "ignore")
+        except Exception:
+            return None
     cleaned = "".join(c.lower() for c in mac if c.isalnum())
     if len(cleaned) == 12 and all(c in "0123456789abcdef" for c in cleaned):
         return cleaned
@@ -208,7 +216,9 @@ def resolve_switch_mgmt_ip(
     if dev.management_ips:
         return None
 
-    # 2. Chassis ID must be a valid MAC
+    # 2. Chassis ID must be a valid MAC; reject if chassis_id_type is known and not MAC (subtype 4)
+    if dev.chassis_id_type is not None and dev.chassis_id_type != 4:
+        return None
     target_mac = normalize_mac(dev.chassis_id)
     if not target_mac:
         return None

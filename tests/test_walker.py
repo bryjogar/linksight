@@ -49,6 +49,10 @@ from linksight.discovery.walker import (
     OID_IP_ROUTE_IF_INDEX_DEFAULT,
     OID_IP_ROUTE_TABLE,
     OID_IP_NET_TO_MEDIA_TABLE,
+    OID_CDP_CACHE_DEVICE_ID,
+    OID_CDP_CACHE_DEVICE_PORT,
+    OID_CDP_CACHE_ADDRESS,
+    OID_CDP_CACHE_PLATFORM,
 )
 
 
@@ -1284,4 +1288,454 @@ def test_walker_single_no_ip_candidate_not_autofollowed_surfaces_actionable():
     assert cand.neighbor_ip == ""
     assert cand.neighbor_chassis == "74:83:c2:11:22:33"
     assert "upstream candidate neighbor found without management IP" in result.edge_summary
+
+
+# =============================================================================
+# VENDOR-CLASS WALK MATRIX (Deliverable 3)
+# Guardrail tests verifying graceful termination, no exceptions, and coherent
+# end states across diverse switch vendor behaviors without Cisco assumptions.
+# =============================================================================
+
+
+def test_vendor_class_cisco_full():
+    """Vendor class: cisco_full.
+
+    Characteristics:
+      - STP fully present (dot1dBaseBridgeAddress, dot1dStpRootBridge, dot1dStpRootPort == 0).
+      - LLDP mgmt IPs present in lldpRemManAddrTable.
+      - Q-BRIDGE-MIB static tables present.
+      - ifHighSpeed present (10000 Mbps on 10G uplink).
+    Assertions:
+      (a) Terminates bounded (no loop, no hang).
+      (b) Never raises.
+      (c) Produces coherent STP root edge with complete port diagnostics.
+    """
+    sw_ip = "10.0.0.1"
+    cisco_mib = {
+        OID_SYS_DESCR: "Cisco IOS Software, C9300 Software (C9300-UNIVERSALK9-M), Version 17.6.4",
+        OID_SYS_NAME: "Cisco-Core-9300",
+        OID_SYS_OBJECT_ID: "1.3.6.1.4.1.9.1.2500",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001a2b3c4d01"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000001a2b3c4d01"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        OID_IP_ROUTE_NEXT_HOP_DEFAULT: "192.168.1.1",
+        # Port 1: Downlink to host
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.1": 1,
+        f"{OID_IF_NAME}.1": "GigabitEthernet1/0/1",
+        f"{OID_IF_HIGH_SPEED}.1": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.1": 5,
+        f"{OID_DOT1Q_PVID}.1": 10,
+        f"{OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS}.10": bytes([0x80]),
+        f"{OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS}.10": bytes([0x80]),
+        f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+        f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+        # Port 24: 10G trunk port
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+        f"{OID_IF_NAME}.24": "TenGigabitEthernet1/0/24",
+        f"{OID_IF_HIGH_SPEED}.24": 10000,
+        f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
+        f"{OID_DOT1Q_PVID}.24": 1,
+        f"{OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS}.1": bytes([0x00, 0x00, 0x01]),
+        f"{OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS}.10": bytes([0x00, 0x00, 0x01]),
+        f"{OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS}.1": bytes([0x00, 0x00, 0x01]),
+    }
+
+    factory = make_mock_client_factory({sw_ip: cisco_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    # (a) Terminates bounded
+    assert len(result.hops) == 1
+    # (b) Never raises (verified by execution)
+    # (c) Coherent edge
+    assert result.success is True
+    assert result.edge_type == "stp_root"
+    assert "Cisco-Core-9300" in result.edge_summary
+
+    hop = result.hops[0]
+    assert hop.device_type == "switch"
+    assert hop.is_stp_root is True
+    assert hop.default_gateway == "192.168.1.1"
+
+    p24 = next((p for p in hop.ports if p.port_id == 24), None)
+    assert p24 is not None
+    assert p24.link_speed_mbps == 10000
+    assert p24.pvid == 1
+    assert p24.allowed_vlans == [1, 10]
+    assert p24.untagged_vlans == [1]
+    assert p24.tagged_vlans == [10]
+
+
+def test_vendor_class_aruba_procurve():
+    """Vendor class: aruba_procurve.
+
+    Characteristics:
+      - STP absent (no dot1dStpRootBridge or dot1dStpRootPort).
+      - Current-table VLANs only (static tables absent / empty).
+      - dot1qPvid reported as 0 on tagged trunk ports (firmware quirk).
+      - ifHighSpeed absent, ifSpeed only in bps (1_000_000_000).
+      - LLDP neighbor to upstream core present with management IP.
+    Assertions:
+      (a) Terminates bounded (Aruba access -> Core root).
+      (b) Never raises.
+      (c) Handles pvid=0 cleanly (not treated as VLAN 0), parses ifSpeed as 1000 Mbps,
+          follows single LLDP candidate to upstream root.
+    """
+    access_ip = "10.0.1.10"
+    core_ip = "10.0.0.1"
+
+    aruba_mib = {
+        OID_SYS_DESCR: "HP J9729A 2920-48G-POE+ Switch, revision WB.16.10.0010",
+        OID_SYS_NAME: "Aruba-ProCurve-2920",
+        OID_SYS_OBJECT_ID: "1.3.6.1.4.1.11.2.3.7.11.162",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86aabbcc"),
+        # STP absent
+        # Port 1: Downlink to host with ifSpeed only (1 Gbps = 1,000,000,000 bps)
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.1": 1,
+        f"{OID_IF_NAME}.1": "1/1",
+        f"{OID_IF_SPEED}.1": 1_000_000_000,
+        f"{OID_DOT1Q_PVID}.1": 10,
+        f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.10": bytes([0x80]),
+        f"{OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS}.0.10": bytes([0x80]),
+        f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+        f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+        # Port 24: Trunk to core, quirk: dot1qPvid reports 0 on tagged trunk
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+        f"{OID_IF_NAME}.24": "1/24",
+        f"{OID_IF_SPEED}.24": 1_000_000_000,
+        f"{OID_DOT1Q_PVID}.24": 0,  # Aruba firmware quirk: pvid == 0
+        f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.100": bytes([0x00, 0x00, 0x01]),
+        # LLDP remote neighbor to Core-MDF
+        f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Core-MDF",
+        f"{OID_LLDP_REM_PORT_ID}.0.24.1": "1/24",
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.24.1.1.4.10.0.0.1": 1,
+    }
+
+    core_mib = {
+        OID_SYS_DESCR: "HPE ArubaOS-CX 8320 Switch",
+        OID_SYS_NAME: "Core-MDF",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86000001"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000000b86000001"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        OID_IP_ROUTE_NEXT_HOP_DEFAULT: "192.168.1.1",
+    }
+
+    factory = make_mock_client_factory({access_ip: aruba_mib, core_ip: core_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=access_ip)
+
+    # (a) Terminates bounded
+    assert len(result.hops) == 2
+    # (b) Never raises
+    # (c) Coherent edge
+    assert result.success is True
+    assert result.edge_type == "stp_root"
+
+    hop1 = result.hops[0]
+    assert hop1.hostname == "Aruba-ProCurve-2920"
+    assert hop1.uplink_port is not None
+    assert hop1.uplink_port.port_id == 24
+    assert hop1.uplink_port.neighbor_ip == core_ip
+
+    # Verify speed parsing from ifSpeed bits/sec -> Mbps
+    p1 = next((p for p in hop1.ports if p.port_id == 1), None)
+    assert p1 is not None
+    assert p1.link_speed_mbps == 1000
+
+    # Verify pvid=0 is treated as no PVID (None, not 0)
+    p24 = hop1.uplink_port
+    assert p24.pvid is None
+    assert p24.effective_pvid is None
+    assert 0 not in p24.allowed_vlans
+    assert p24.allowed_vlans == [100]
+
+
+def test_vendor_class_unifi_thin():
+    """Vendor class: unifi_thin.
+
+    Characteristics:
+      - STP absent (no BRIDGE-MIB STP subtree).
+      - No LLDP management IP TLVs (UniFi field bug: chassis MAC only).
+      - No CDP.
+      - Sparse IF-MIB (ifName only, no ifHighSpeed).
+    Assertions:
+      (a) Terminates bounded (stops at hop 1).
+      (b) Never raises.
+      (c) Produces actionable ambiguous/continue state with normalized chassis MAC,
+          never a dead-end crash or silent empty path.
+    """
+    unifi_ip = "192.168.1.20"
+    unifi_mib = {
+        OID_SYS_DESCR: "UniFi Switch USW-24-PoE, Linux 4.14.222-ui-5.2",
+        OID_SYS_NAME: "USW-24-PoE",
+        OID_SYS_OBJECT_ID: "1.3.6.1.4.1.41112.1.4",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("7483c2112233"),
+        # Sparse IF-MIB: only ifName
+        f"{OID_IF_NAME}.1": "Port 1",
+        f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+        f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+        # Port 24: Upstream switch, no mgmt IP advertised
+        f"{OID_IF_NAME}.24": "Port 24",
+        f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "USW-Pro-Aggregation",
+        f"{OID_LLDP_REM_PORT_ID}.0.24.1": "Port 1",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.24.1": bytes.fromhex("7483c2445566"),
+    }
+
+    factory = make_mock_client_factory({unifi_ip: unifi_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=unifi_ip)
+
+    # (a) Terminates bounded
+    assert len(result.hops) == 1
+    # (b) Never raises
+    # (c) Coherent actionable state
+    assert result.success is False
+    assert result.edge_type == "ambiguous"
+
+    hop = result.hops[0]
+    assert hop.status == "ambiguous"
+    assert hop.device_type == "switch"
+    assert hop.uplink_port is None
+    assert len(hop.ambiguous_candidates) == 1
+
+    cand = hop.ambiguous_candidates[0]
+    assert cand.port_id == 24
+    assert cand.neighbor_name == "USW-Pro-Aggregation"
+    assert cand.neighbor_ip == ""
+    assert cand.neighbor_chassis == "74:83:c2:44:55:66"
+    assert "upstream candidate neighbor found without management IP" in result.edge_summary
+
+
+def test_vendor_class_minimal_generic():
+    """Vendor class: minimal_generic.
+
+    Characteristics:
+      - sysDescr contains no vendor keywords ("Generic 8-Port Gigabit Smart Switch").
+      - No STP subtree at all.
+      - No Q-BRIDGE-MIB at all (no dot1q tables).
+      - No FDB table at all.
+      - IF-MIB has ifName and SMB direct-Mbps quirk in ifSpeed (ifSpeed=1000).
+      - LLDP has remote sys name and non-MAC chassis ID (text string b"core-router-chassis").
+    Assertions:
+      (a) Terminates bounded.
+      (b) Never raises.
+      (c) Classifies device as 'switch' based on LLDP evidence, parses speed correctly,
+          formats non-MAC chassis_id as 'Chassis core-router-chassis' (not bogus MAC),
+          and produces an actionable ambiguous edge summary.
+    """
+    sw_ip = "192.168.10.2"
+    generic_mib = {
+        OID_SYS_DESCR: "Generic 8-Port Gigabit Smart Switch",
+        OID_SYS_NAME: "SMB-Switch-01",
+        # Only ifName and SMB direct-Mbps ifSpeed (1000 = 1000 Mbps)
+        f"{OID_IF_NAME}.1": "port1",
+        f"{OID_IF_SPEED}.1": 1000,
+        f"{OID_IF_NAME}.8": "port8",
+        f"{OID_IF_SPEED}.8": 1000,
+        # LLDP with non-MAC chassis ID string (IEEE subtype locally assigned)
+        f"{OID_LLDP_REM_SYS_NAME}.0.8.1": "Core-Gateway",
+        f"{OID_LLDP_REM_PORT_ID}.0.8.1": "eth1",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.8.1": b"core-router-chassis",
+    }
+
+    factory = make_mock_client_factory({sw_ip: generic_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    # (a) Terminates bounded
+    assert len(result.hops) == 1
+    # (b) Never raises
+    # (c) Coherent actionable state
+    assert result.success is False
+    assert result.edge_type == "ambiguous"
+
+    hop = result.hops[0]
+    # Classifier fell back to switch based on LLDP evidence rather than guessing
+    assert hop.device_type == "switch"
+
+    p1 = next((p for p in hop.ports if p.port_id == 1), None)
+    assert p1 is not None
+    assert p1.link_speed_mbps == 1000  # parsed SMB direct Mbps
+
+    assert len(hop.ambiguous_candidates) == 1
+    cand = hop.ambiguous_candidates[0]
+    assert cand.neighbor_name == "Core-Gateway"
+    assert cand.neighbor_chassis == "core-router-chassis"
+    assert "Core-Gateway" in result.edge_summary
+
+    # Also verify non-MAC chassis display formatting when neighbor_name is absent
+    generic_no_name = dict(generic_mib)
+    del generic_no_name[f"{OID_LLDP_REM_SYS_NAME}.0.8.1"]
+    factory2 = make_mock_client_factory({sw_ip: generic_no_name})
+    walker2 = UpstreamWalker(community="public", client_factory=factory2)
+    result2 = walker2.walk(start_ip=sw_ip)
+    assert result2.edge_type == "ambiguous"
+    assert "Chassis core-router-chassis" in result2.edge_summary
+
+
+def test_vendor_class_cisco_cdp_only():
+    """Vendor class: cisco_cdp_only.
+
+    Characteristics:
+      - LLDP is globally disabled on the Cisco switch.
+      - CDP is enabled, carrying upstream neighbor name, port, and IP on port 24.
+      - CDP OID has 2-part index: <ifIndex>.<deviceIndex>.
+      - STP direction subtree absent (unmanaged / STP disabled).
+    Assertions:
+      (a) Terminates bounded.
+      (b) Never raises.
+      (c) Correctly extracts CDP neighbor from parts[-2] ifIndex and follows it upstream.
+    """
+    sw1_ip = "10.0.0.10"
+    sw2_ip = "10.0.0.1"
+
+    cisco_cdp_mib = {
+        OID_SYS_DESCR: "Cisco IOS Software, C2960X Software",
+        OID_SYS_NAME: "Access-SW1",
+        OID_SYS_OBJECT_ID: "1.3.6.1.4.1.9.1.1208",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001122334455"),
+        # Port 1: Local host
+        f"{OID_IF_NAME}.1": "Gi1/0/1",
+        f"{OID_IF_HIGH_SPEED}.1": 1000,
+        # Port 24: CDP neighbor to Core (ifIndex 24, deviceIndex 1)
+        f"{OID_IF_NAME}.24": "Gi1/0/24",
+        f"{OID_IF_HIGH_SPEED}.24": 1000,
+        f"{OID_CDP_CACHE_DEVICE_ID}.24.1": "Core-C9300",
+        f"{OID_CDP_CACHE_DEVICE_PORT}.24.1": "GigabitEthernet1/0/1",
+        f"{OID_CDP_CACHE_ADDRESS}.24.1": "10.0.0.1",
+        f"{OID_CDP_CACHE_PLATFORM}.24.1": "cisco WS-C9300-24T",
+    }
+
+    core_mib = {
+        OID_SYS_DESCR: "Cisco IOS Software, C9300 Software",
+        OID_SYS_NAME: "Core-C9300",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001122330001"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000001122330001"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        OID_IP_ROUTE_NEXT_HOP_DEFAULT: "192.168.1.1",
+    }
+
+    factory = make_mock_client_factory({sw1_ip: cisco_cdp_mib, sw2_ip: core_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw1_ip)
+
+    assert result.success is True
+    assert len(result.hops) == 2
+    assert result.hops[0].uplink_port is not None
+    assert result.hops[0].uplink_port.port_id == 24
+    assert result.hops[0].uplink_port.neighbor_name == "Core-C9300"
+    assert result.hops[0].uplink_port.neighbor_ip == sw2_ip
+    assert result.hops[1].hostname == "Core-C9300"
+
+
+def test_snmp_client_missing_oid_returns_none_not_raises():
+    """Verify SnmpClient.get on missing OIDs returns None rather than raising an exception."""
+    from linksight.discovery.snmp_client import SnmpClient
+
+    store = {"1.3.6.1.2.1.1.1.0": "Router"}
+
+    def mock_transport(req_bytes: bytes) -> bytes:
+        tag, msg_bytes, _ = decode_tlv(req_bytes, 0)
+        pos = 0
+        _, vbytes, pos = decode_tlv(msg_bytes, pos)
+        _, cbytes, pos = decode_tlv(msg_bytes, pos)
+        comm = decode_value(0x04, cbytes)
+        ptag, pbytes, _ = decode_tlv(msg_bytes, pos)
+        ppos = 0
+        _, rbytes, ppos = decode_tlv(pbytes, ppos)
+        req_id = decode_value(0x02, rbytes)
+        _, _, ppos = decode_tlv(pbytes, ppos)
+        _, _, ppos = decode_tlv(pbytes, ppos)
+        _, vbl_bytes, _ = decode_tlv(pbytes, ppos)
+
+        requested_oids = []
+        vb_pos = 0
+        while vb_pos < len(vbl_bytes):
+            _, vb_data, vb_pos = decode_tlv(vbl_bytes, vb_pos)
+            _, obytes, _ = decode_tlv(vb_data, 0)
+            requested_oids.append(decode_oid(obytes))
+
+        varbinds = [(roid, store.get(roid, NoSuchObject())) for roid in requested_oids]
+        return build_snmp_request(comm, PDU_GET_RESPONSE, req_id, varbinds)
+
+    client = SnmpClient("10.0.0.1", community="public", transport=mock_transport)
+    # Missing single OID returns None
+    assert client.get("1.3.6.1.2.1.999.0") is None
+    # Present single OID returns value
+    assert client.get("1.3.6.1.2.1.1.1.0") == "Router"
+    # Multi GET maps missing to None
+    res = client.get(["1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.999.0"])
+    assert res["1.3.6.1.2.1.1.1.0"] == "Router"
+    assert res["1.3.6.1.2.1.999.0"] is None
+
+
+def test_snmp_client_walk_mid_table_error_preserves_rows():
+    """Verify that a walk hitting an error mid-table returns the rows collected prior to the error."""
+    from linksight.discovery.snmp_client import SnmpClient, SnmpError
+
+    call_count = 0
+
+    def mock_transport(req_bytes: bytes) -> bytes:
+        nonlocal call_count
+        call_count += 1
+        tag, msg_bytes, _ = decode_tlv(req_bytes, 0)
+        pos = 0
+        _, vbytes, pos = decode_tlv(msg_bytes, pos)
+        _, cbytes, pos = decode_tlv(msg_bytes, pos)
+        comm = decode_value(0x04, cbytes)
+        ptag, pbytes, _ = decode_tlv(msg_bytes, pos)
+        ppos = 0
+        _, rbytes, ppos = decode_tlv(pbytes, ppos)
+        req_id = decode_value(0x02, rbytes)
+
+        if call_count <= 2:
+            # First 2 rows succeed
+            oid = f"1.3.6.1.2.1.2.2.1.1.{call_count}"
+            varbinds = [(oid, call_count)]
+            return build_snmp_request(comm, PDU_GET_RESPONSE, req_id, varbinds)
+        else:
+            # 3rd row returns genErr (5)
+            from linksight.discovery.snmp_client import encode_sequence, encode_int, encode_len, encode_str
+            err_stat = encode_int(5)  # genErr
+            err_idx = encode_int(1)
+            pdu_payload = encode_int(req_id) + err_stat + err_idx + encode_sequence(b"")
+            pdu = bytes([PDU_GET_RESPONSE]) + encode_len(len(pdu_payload)) + pdu_payload
+            msg_payload = encode_int(1) + encode_str(comm) + pdu
+            return encode_sequence(msg_payload)
+
+    client = SnmpClient("10.0.0.1", community="public", transport=mock_transport)
+    rows = client.walk("1.3.6.1.2.1.2.2.1.1")
+    # Must have preserved the first 2 rows rather than aborting and returning []
+    assert len(rows) == 2
+    assert rows[0] == ("1.3.6.1.2.1.2.2.1.1.1", 1)
+    assert rows[1] == ("1.3.6.1.2.1.2.2.1.1.2", 2)
+
+
+def test_hop1_fdb_walk_capped_on_large_table():
+    """Verify that FDB walk fallback on hop 1 caps at 200 entries and never hangs."""
+    from linksight.discovery.walker import OID_DOT1D_TP_FDB_PORT
+
+    sw_ip = "10.0.0.10"
+    # FDB table with 300 entries, but endpoint MAC is NOT among them
+    sw_mib = {
+        OID_SYS_DESCR: "Core Switch With 300 FDB Entries",
+        OID_SYS_NAME: "Core-Big-FDB",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001122334455"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000001122334455"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_IF_NAME}.1": "Port 1",
+    }
+    for i in range(1, 301):
+        sw_mib[f"{OID_DOT1D_TP_FDB_PORT}.0.0.0.0.1.{i}"] = 1
+
+    factory = make_mock_client_factory({sw_ip: sw_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+
+    # Search for an endpoint MAC that is not in the table
+    result = walker.walk(start_ip=sw_ip, endpoint_mac="00:aa:bb:cc:dd:ee")
+
+    assert result.success is True
+    assert len(result.hops) == 1
+    # Downlink remains None without hanging
+    assert result.hops[0].downlink_port is None
 

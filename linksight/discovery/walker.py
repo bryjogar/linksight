@@ -11,10 +11,12 @@ from typing import Any, Callable
 
 from .classifier import classify_device, is_edge_device
 from .models import Hop, PortDiagnostics, UpstreamPath
+from .arp_resolve import normalize_mac
 from .snmp_client import (
     SnmpClient,
     SnmpError,
     SnmpTimeoutError,
+    SnmpAuthError,
     NoSuchObject,
     NoSuchInstance,
     EndOfMibView,
@@ -104,19 +106,63 @@ def _format_mac(val: bytes | str | None) -> str:
     if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)) or val is None:
         return ""
     if isinstance(val, bytes):
+        if len(val) in (6, 8):
+            return ":".join(f"{b:02x}" for b in val)
+        try:
+            text = val.decode("utf-8")
+            if text.isprintable():
+                return text
+        except (UnicodeDecodeError, Exception):
+            pass
         return ":".join(f"{b:02x}" for b in val)
     if isinstance(val, str):
         cleaned = val.replace("-", ":").replace(".", "").lower()
-        if len(cleaned) == 12:
+        if len(cleaned) == 12 and all(c in "0123456789abcdef" for c in cleaned):
             return ":".join(cleaned[i : i + 2] for i in range(0, 12, 2))
         return val
     return ""
 
 
+def _decode_ip_address(val: Any) -> str | None:
+    """Decode IP address from bytes, str, or OCTET STRING."""
+    if not val or isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+        return None
+    if isinstance(val, bytes):
+        if len(val) == 4:
+            return ".".join(str(b) for b in val)
+        try:
+            val = val.decode("utf-8", "ignore")
+        except Exception:
+            return None
+    if isinstance(val, str):
+        val = val.strip()
+        if "." in val and all(part.isdigit() for part in val.split(".") if part):
+            return val
+        if len(val) == 4:
+            return ".".join(str(ord(c)) for c in val)
+    return None
+
+
+def _parse_if_speed(val: Any) -> int | None:
+    """Parse IF-MIB ifSpeed value in bits/sec or Mbps to integer Mbps.
+
+    Rejects 32-bit gauge clamp (4294967295) and non-positive values.
+    If >= 1_000_000, divides by 1_000_000 (bits/sec -> Mbps).
+    If 0 < val < 1_000_000, treats as direct Mbps (SMB vendor quirk).
+    """
+    if not isinstance(val, int) or isinstance(val, bool) or val <= 0:
+        return None
+    if val >= 4294967295:  # Gauge32 clamp for >4.29Gbps per RFC 2863
+        return None
+    if val >= 1_000_000:
+        return val // 1_000_000
+    return val
+
+
 def _ports_from_bitmask(bitmask: bytes | str) -> list[int]:
     """Decode Q-BRIDGE-MIB port bitmask to list of 1-based port numbers."""
     if isinstance(bitmask, str):
-        bitmask = bitmask.encode("latin-1")
+        bitmask = bitmask.encode("latin-1", "replace")
     ports: list[int] = []
     for byte_idx, b in enumerate(bitmask):
         for bit_idx in range(8):
@@ -167,6 +213,22 @@ def _is_stp_root_bridge(
     return False
 
 
+def _matches_candidate(port: PortDiagnostics, cand: PortDiagnostics) -> bool:
+    """Check whether a port matches the specified forced candidate."""
+    if cand.neighbor_chassis and port.neighbor_chassis:
+        c_mac = normalize_mac(cand.neighbor_chassis)
+        p_mac = normalize_mac(port.neighbor_chassis)
+        if c_mac and p_mac and c_mac == p_mac:
+            return True
+        if c_mac and p_mac and c_mac != p_mac:
+            return False
+    if cand.neighbor_name and port.neighbor_name:
+        if cand.neighbor_name.strip().lower() == port.neighbor_name.strip().lower():
+            return True
+        return False
+    return True
+
+
 class UpstreamWalker:
     """Executes the upstream discovery chain walk starting from a switch management IP."""
 
@@ -204,6 +266,9 @@ class UpstreamWalker:
         stop_check: Callable[[], bool] | None = None,
         forced_next_ip: str | None = None,
         endpoint_mac: str | None = None,
+        forced_port_id: int | str | None = None,
+        forced_hop_ip: str | None = None,
+        forced_candidate: PortDiagnostics | None = None,
     ) -> UpstreamPath:
         """Walk the upstream switch chain starting at start_ip."""
         hops: list[Hop] = []
@@ -213,6 +278,9 @@ class UpstreamWalker:
         max_hops = 16
         edge_type = "unknown"
         edge_summary = ""
+
+        if forced_candidate is not None and forced_port_id is None:
+            forced_port_id = forced_candidate.port_id
 
         norm_endpoint_mac: str | None = None
         if endpoint_mac:
@@ -242,18 +310,23 @@ class UpstreamWalker:
                     sys_descr = str(sys_data.get(OID_SYS_DESCR) or "")
                     sys_obj_id = str(sys_data.get(OID_SYS_OBJECT_ID) or "")
                     sys_name = str(sys_data.get(OID_SYS_NAME) or "")
-                except (SnmpTimeoutError, SnmpError) as e:
-                    # Switch unreachable / timeout
+                except (SnmpTimeoutError, SnmpAuthError, SnmpError) as e:
+                    is_auth = isinstance(e, SnmpAuthError) or "authorizationError" in str(e).lower()
+                    is_timeout = isinstance(e, SnmpTimeoutError)
+                    status = "auth_failed" if is_auth else ("timeout" if is_timeout else "unreachable")
                     hop = Hop(
                         hop_index=hop_index,
                         mgmt_ip=curr_ip,
-                        status="timeout" if isinstance(e, SnmpTimeoutError) else "unreachable",
+                        status=status,
                         error_message=str(e),
                         response_time_ms=(time.perf_counter() - t0) * 1000,
                     )
                     hops.append(hop)
-                    edge_type = "timeout"
-                    edge_summary = f"Walk stopped at hop {hop_index} ({curr_ip}): {e}"
+                    edge_type = status
+                    if is_auth:
+                        edge_summary = f"Walk stopped at hop {hop_index} ({curr_ip}): SNMP authentication failed (invalid community string)."
+                    else:
+                        edge_summary = f"Walk stopped at hop {hop_index} ({curr_ip}): {e}"
                     break
 
                 device_type = classify_device(sys_descr, sys_name, sys_obj_id)
@@ -297,8 +370,10 @@ class UpstreamWalker:
                     try:
                         for oid, val in client.walk(OID_IF_SPEED):
                             idx = _parse_last_oid_index(oid)
-                            if idx is not None and idx not in if_speeds and isinstance(val, int) and val > 0:
-                                if_speeds[idx] = val // 1_000_000
+                            if idx is not None and idx not in if_speeds:
+                                parsed_spd = _parse_if_speed(val)
+                                if parsed_spd is not None:
+                                    if_speeds[idx] = parsed_spd
                     except Exception:
                         pass
 
@@ -327,10 +402,9 @@ class UpstreamWalker:
                         gw_val = route_data.get(OID_IP_ROUTE_NEXT_HOP_DEFAULT)
                         if_idx_val = route_data.get(OID_IP_ROUTE_IF_INDEX_DEFAULT)
 
-                        if gw_val and isinstance(gw_val, (str, bytes)):
-                            ip_str = gw_val if isinstance(gw_val, str) else ".".join(str(b) for b in gw_val)
-                            if ip_str and ip_str != "0.0.0.0":
-                                isp_gateway = ip_str
+                        gw_ip = _decode_ip_address(gw_val)
+                        if gw_ip and gw_ip != "0.0.0.0":
+                            isp_gateway = gw_ip
                         if isinstance(if_idx_val, int) and if_idx_val > 0:
                             default_route_if_index = if_idx_val
                     except Exception:
@@ -345,8 +419,8 @@ class UpstreamWalker:
                                         if isinstance(val, int) and val > 0 and default_route_if_index is None:
                                             default_route_if_index = val
                                     elif ".4.21.1.7." in oid or oid.startswith("1.3.6.1.2.1.4.21.1.7."):
-                                        if val and isinstance(val, (str, bytes)) and isp_gateway is None:
-                                            ip_str = val if isinstance(val, str) else ".".join(str(b) for b in val)
+                                        if val and isp_gateway is None:
+                                            ip_str = _decode_ip_address(val)
                                             if ip_str and ip_str != "0.0.0.0":
                                                 isp_gateway = ip_str
                         except Exception:
@@ -612,8 +686,10 @@ class UpstreamWalker:
                 try:
                     for oid, val in client.walk(OID_IF_SPEED):
                         idx = _parse_last_oid_index(oid)
-                        if idx is not None and idx not in if_speeds and isinstance(val, int) and val > 0:
-                            if_speeds[idx] = val // 1_000_000
+                        if idx is not None and idx not in if_speeds:
+                            parsed_spd = _parse_if_speed(val)
+                            if parsed_spd is not None:
+                                if_speeds[idx] = parsed_spd
                 except Exception:
                     pass
 
@@ -626,7 +702,7 @@ class UpstreamWalker:
                 try:
                     for oid, val in client.walk(OID_DOT1Q_PVID):
                         p_num = _parse_last_oid_index(oid)
-                        if p_num is not None and isinstance(val, int) and not isinstance(val, bool):
+                        if p_num is not None and isinstance(val, int) and not isinstance(val, bool) and val > 0:
                             port_pvids[p_num] = val
                 except Exception:
                     pass
@@ -720,24 +796,30 @@ class UpstreamWalker:
                 except Exception:
                     pass
 
-                # CDP table fallback
+                # CDP table fallback (CISCO-CDP-MIB)
                 try:
                     for oid, val in client.walk(OID_CDP_CACHE_DEVICE_ID):
-                        if_idx = _parse_last_oid_index(oid)
-                        if if_idx is not None:
-                            port_neighbors.setdefault(if_idx, {})["name"] = str(val)
+                        parts = oid.strip(".").split(".")
+                        p_cand = int(parts[-2]) if (len(parts) >= 2 and parts[-2].isdigit()) else _parse_last_oid_index(oid)
+                        if p_cand is not None and val:
+                            port_neighbors.setdefault(p_cand, {})["name"] = str(val)
                     for oid, val in client.walk(OID_CDP_CACHE_DEVICE_PORT):
-                        if_idx = _parse_last_oid_index(oid)
-                        if if_idx is not None:
-                            port_neighbors.setdefault(if_idx, {})["port"] = str(val)
+                        parts = oid.strip(".").split(".")
+                        p_cand = int(parts[-2]) if (len(parts) >= 2 and parts[-2].isdigit()) else _parse_last_oid_index(oid)
+                        if p_cand is not None and val:
+                            port_neighbors.setdefault(p_cand, {})["port"] = str(val)
                     for oid, val in client.walk(OID_CDP_CACHE_ADDRESS):
-                        if_idx = _parse_last_oid_index(oid)
-                        if if_idx is not None:
-                            ip_str = val if isinstance(val, str) else (
-                                ".".join(str(b) for b in val) if isinstance(val, bytes) and len(val) == 4 else ""
-                            )
+                        parts = oid.strip(".").split(".")
+                        p_cand = int(parts[-2]) if (len(parts) >= 2 and parts[-2].isdigit()) else _parse_last_oid_index(oid)
+                        if p_cand is not None:
+                            ip_str = _decode_ip_address(val)
                             if ip_str:
-                                port_neighbors.setdefault(if_idx, {})["ip"] = ip_str
+                                port_neighbors.setdefault(p_cand, {})["ip"] = ip_str
+                    for oid, val in client.walk(OID_CDP_CACHE_PLATFORM):
+                        parts = oid.strip(".").split(".")
+                        p_cand = int(parts[-2]) if (len(parts) >= 2 and parts[-2].isdigit()) else _parse_last_oid_index(oid)
+                        if p_cand is not None and val:
+                            port_neighbors.setdefault(p_cand, {})["platform"] = str(val)
                 except Exception:
                     pass
 
@@ -745,8 +827,9 @@ class UpstreamWalker:
                 default_gw = None
                 try:
                     gw_val = client.get(OID_IP_ROUTE_NEXT_HOP_DEFAULT)
-                    if gw_val and isinstance(gw_val, str) and gw_val != "0.0.0.0":
-                        default_gw = gw_val
+                    gw_ip = _decode_ip_address(gw_val)
+                    if gw_ip and gw_ip != "0.0.0.0":
+                        default_gw = gw_ip
                 except Exception:
                     pass
 
@@ -761,9 +844,16 @@ class UpstreamWalker:
                     | set(port_neighbors.keys())
                     | set(port_egress_vlans.keys())
                     | set(port_untagged_vlans.keys())
+                    | set(port_ifindex_map.keys())
                 )
+                if not port_ifindex_map:
+                    all_port_ids |= set(if_names.keys()) | set(if_speeds.keys())
+                elif not all_port_ids:
+                    all_port_ids = set(if_names.keys()) | set(if_speeds.keys())
                 if stp_root_port and stp_root_port > 0:
                     all_port_ids.add(stp_root_port)
+
+                inverse_ifindex_map = {if_idx: p_num for p_num, if_idx in port_ifindex_map.items()}
 
                 for p_num in sorted(all_port_ids):
                     if_idx = port_ifindex_map.get(p_num, p_num)
@@ -771,6 +861,8 @@ class UpstreamWalker:
                     p_speed = if_speeds.get(if_idx) or if_speeds.get(p_num)
                     p_state = stp_port_states.get(p_num, "forwarding" if is_root else "unknown")
                     p_pvid = port_pvids.get(p_num)
+                    if p_pvid is not None and p_pvid <= 0:
+                        p_pvid = None
 
                     egress_set = port_egress_vlans.get(p_num, set())
                     untagged_set = port_untagged_vlans.get(p_num, set())
@@ -779,14 +871,19 @@ class UpstreamWalker:
                         p_untagged = sorted(untagged_set)
                         p_tagged = sorted(egress_set - untagged_set)
                         p_allowed = sorted(set(p_untagged) | set(p_tagged))
-                        if not p_allowed and p_pvid is not None:
+                        if not p_allowed and p_pvid is not None and p_pvid > 0:
                             p_allowed = [p_pvid]
                     else:
                         p_untagged = []
                         p_tagged = []
-                        p_allowed = sorted(egress_set) if egress_set else ([p_pvid] if p_pvid is not None else [])
+                        p_allowed = sorted(egress_set) if egress_set else ([p_pvid] if (p_pvid is not None and p_pvid > 0) else [])
 
-                    p_neigh = port_neighbors.get(p_num) or port_neighbors.get(if_idx) or {}
+                    p_neigh = (
+                        port_neighbors.get(p_num)
+                        or port_neighbors.get(if_idx)
+                        or (port_neighbors.get(inverse_ifindex_map[p_num]) if p_num in inverse_ifindex_map else {})
+                        or {}
+                    )
 
                     is_this_root_port = bool(stp_root_port and p_num == stp_root_port)
 
@@ -908,9 +1005,12 @@ class UpstreamWalker:
                         except Exception:
                             pass
 
-                        # 2. Walk dot1dTpFdbPort
+                        # 2. Walk dot1dTpFdbPort (capped at 200 rows and 2.0s time bound)
                         if matched_bridge_port is None:
-                            for oid, val in client.walk(OID_DOT1D_TP_FDB_PORT):
+                            fdb_start = time.perf_counter()
+                            for oid, val in client.walk(OID_DOT1D_TP_FDB_PORT, max_rows=200):
+                                if (time.perf_counter() - fdb_start) > 2.0:
+                                    break
                                 parts = oid.strip(".").split(".")
                                 if len(parts) >= 6 and all(p.isdigit() for p in parts[-6:]):
                                     mac_hex = "".join(f"{int(p):02x}" for p in parts[-6:])
@@ -973,35 +1073,54 @@ class UpstreamWalker:
                                 continue
                         candidate_uplinks.append(p)
 
-                    if forced_next_ip:
+                    if forced_next_ip or forced_port_id is not None:
                         forced_port = None
-                        for p in candidate_uplinks:
-                            if p.neighbor_ip == forced_next_ip:
-                                forced_port = p
-                                break
-                        if forced_port is None:
+                        # 1. Direct port_id match on target hop (deterministic continuation)
+                        if forced_port_id is not None and (not forced_hop_ip or curr_ip == forced_hop_ip):
+                            for p in candidate_uplinks:
+                                if p.port_id == forced_port_id or str(p.port_id) == str(forced_port_id):
+                                    if forced_candidate is None or _matches_candidate(p, forced_candidate):
+                                        forced_port = p
+                                        break
+                            if forced_port is None:
+                                for p in ports_list:
+                                    if p.port_id == forced_port_id or str(p.port_id) == str(forced_port_id):
+                                        if forced_candidate is None or _matches_candidate(p, forced_candidate):
+                                            forced_port = p
+                                            break
+
+                        # 2. Existing fallback: exact neighbor_ip match
+                        if forced_port is None and forced_next_ip:
+                            for p in candidate_uplinks:
+                                if p.neighbor_ip == forced_next_ip:
+                                    forced_port = p
+                                    break
+                        if forced_port is None and forced_next_ip:
                             for p in ports_list:
                                 if p.neighbor_ip == forced_next_ip:
                                     forced_port = p
                                     break
-                        if forced_port is None:
+
+                        # 3. Existing fallback: ARP-table reverse lookup
+                        if forced_port is None and forced_next_ip:
                             try:
                                 for oid, val in client.walk(OID_IP_NET_TO_MEDIA_TABLE):
                                     parts = oid.strip(".").split(".")
                                     if len(parts) >= 6 and ".".join(parts[-4:]) == forced_next_ip:
                                         mac_val = _format_mac(val)
-                                        if mac_val:
-                                            from .arp_resolve import normalize_mac
-                                            n_mac = normalize_mac(mac_val)
+                                        n_mac = normalize_mac(mac_val)
+                                        if n_mac:
                                             for p in candidate_uplinks:
-                                                if normalize_mac(p.neighbor_chassis) == n_mac:
+                                                if p.neighbor_chassis and normalize_mac(p.neighbor_chassis) == n_mac:
                                                     forced_port = p
                                                     break
                                         if forced_port:
                                             break
                             except Exception:
                                 pass
-                        if forced_port is None:
+
+                        # 4. Existing fallback: single candidate fallback
+                        if forced_port is None and forced_next_ip:
                             no_ip_cands = [p for p in candidate_uplinks if not p.neighbor_ip]
                             if len(no_ip_cands) == 1:
                                 forced_port = no_ip_cands[0]
@@ -1009,26 +1128,45 @@ class UpstreamWalker:
                                 forced_port = candidate_uplinks[0]
 
                         if forced_port is not None:
-                            if not forced_port.neighbor_ip:
+                            if forced_next_ip and not forced_port.neighbor_ip:
                                 forced_port.neighbor_ip = forced_next_ip
+                            if forced_port.is_downlink:
+                                forced_port.is_downlink = False
+                            if downlink_port_diag is forced_port:
+                                downlink_port_diag = None
                             uplink_port_diag = forced_port
                             uplink_port_diag.is_uplink = True
                             forced_next_ip = None  # consumed
+                            forced_port_id = None  # consumed
+                            forced_candidate = None  # consumed
                     elif not is_root and len(candidate_uplinks) == 1 and candidate_uplinks[0].neighbor_ip:
                         uplink_port_diag = candidate_uplinks[0]
                         uplink_port_diag.is_uplink = True
-                elif forced_next_ip:
+                elif forced_next_ip or forced_port_id is not None:
                     forced_port = None
-                    for p in ports_list:
-                        if p.neighbor_ip == forced_next_ip:
-                            forced_port = p
-                            break
+                    if forced_port_id is not None and (not forced_hop_ip or curr_ip == forced_hop_ip):
+                        for p in ports_list:
+                            if p.port_id == forced_port_id or str(p.port_id) == str(forced_port_id):
+                                if forced_candidate is None or _matches_candidate(p, forced_candidate):
+                                    forced_port = p
+                                    break
+                    if forced_port is None and forced_next_ip:
+                        for p in ports_list:
+                            if p.neighbor_ip == forced_next_ip:
+                                forced_port = p
+                                break
                     if forced_port is not None:
-                        if not forced_port.neighbor_ip:
+                        if forced_next_ip and not forced_port.neighbor_ip:
                             forced_port.neighbor_ip = forced_next_ip
+                        if forced_port.is_downlink:
+                            forced_port.is_downlink = False
+                        if downlink_port_diag is forced_port:
+                            downlink_port_diag = None
                         uplink_port_diag = forced_port
                         uplink_port_diag.is_uplink = True
                         forced_next_ip = None
+                        forced_port_id = None
+                        forced_candidate = None
 
                 is_verified_root_from_downstream = bool(
                     prev_hop is not None
@@ -1052,12 +1190,19 @@ class UpstreamWalker:
                     elif candidate_uplinks and uplink_port_diag is None:
                         hop_status = "ambiguous"
 
+                if device_type in ("switch", "unknown"):
+                    has_switch_evidence = bool(stp_present or bridge_addr or port_neighbors or port_pvids or port_egress_vlans)
+                    if has_switch_evidence:
+                        device_type = "switch"
+                    elif not device_type or device_type == "unknown":
+                        device_type = "switch"
+
                 hop = Hop(
                     hop_index=hop_index,
                     hostname=sys_name or curr_ip,
                     mgmt_ip=curr_ip,
                     sys_descr=sys_descr,
-                    device_type="switch",
+                    device_type=device_type,
                     is_stp_root=is_root,
                     stp_root_bridge_id=_format_mac(stp_root_bridge or ""),
                     stp_bridge_id=_format_mac(bridge_addr or ""),
@@ -1112,7 +1257,13 @@ class UpstreamWalker:
                         edge_type = "ambiguous"
                         cand_list = [
                             f"{p.neighbor_name} ({p.neighbor_ip})" if (p.neighbor_name and p.neighbor_ip)
-                            else (p.neighbor_name or (f"MAC {p.neighbor_chassis}" if p.neighbor_chassis else f"Port {p.port_id}"))
+                            else (
+                                p.neighbor_name
+                                or (
+                                    (f"MAC {p.neighbor_chassis}" if normalize_mac(p.neighbor_chassis) else f"Chassis {p.neighbor_chassis}")
+                                    if p.neighbor_chassis else f"Port {p.port_id}"
+                                )
+                            )
                             for p in candidate_uplinks
                         ]
                         cand_desc = ", ".join(cand_list)

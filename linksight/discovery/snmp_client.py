@@ -54,6 +54,29 @@ class SnmpAuthError(SnmpError):
     pass
 
 
+SNMP_ERROR_STATUS_MAP = {
+    0: "noError",
+    1: "tooBig",
+    2: "noSuchName",
+    3: "badValue",
+    4: "readOnly",
+    5: "genErr",
+    6: "noAccess",
+    7: "wrongType",
+    8: "wrongLength",
+    9: "wrongEncoding",
+    10: "wrongValue",
+    11: "noCreation",
+    12: "inconsistentValue",
+    13: "resourceUnavailable",
+    14: "commitFailed",
+    15: "undoFailed",
+    16: "authorizationError",
+    17: "notWritable",
+    18: "inconsistentName",
+}
+
+
 class EndOfMibView:
     def __repr__(self) -> str:
         return "EndOfMibView"
@@ -370,10 +393,30 @@ class SnmpClient:
         resp_data = self._send_recv(req_bytes, req_id)
         _, _, _, err_stat, _, varbinds = parse_snmp_response(resp_data)
 
-        if err_stat != 0:
-            raise SnmpError(f"SNMP GET returned error status {err_stat}")
+        # RFC 1157 / RFC 1905 err_stat == 2 is noSuchName (OID missing on agent)
+        if err_stat == 2:
+            if single:
+                return None
+            res_dict = {oid: None for oid in oid_list}
+            for oid, val in varbinds:
+                if not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                    res_dict[oid] = val
+            return res_dict
 
-        res_dict = {oid: val for oid, val in varbinds}
+        if err_stat == 16:
+            raise SnmpAuthError("SNMP community authentication failed (authorizationError)")
+
+        if err_stat != 0:
+            err_name = SNMP_ERROR_STATUS_MAP.get(err_stat, f"status {err_stat}")
+            raise SnmpError(f"SNMP GET returned error: {err_name} ({err_stat})")
+
+        res_dict = {}
+        for oid, val in varbinds:
+            if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                res_dict[oid] = None
+            else:
+                res_dict[oid] = val
+
         if single:
             return res_dict.get(oid_list[0])
         return res_dict
@@ -384,8 +427,11 @@ class SnmpClient:
         req_bytes = build_snmp_request(
             self._community, PDU_GET_NEXT_REQUEST, req_id, [(oid, None)]
         )
-        resp_data = self._send_recv(req_bytes, req_id)
-        _, _, _, err_stat, _, varbinds = parse_snmp_response(resp_data)
+        try:
+            resp_data = self._send_recv(req_bytes, req_id)
+            _, _, _, err_stat, _, varbinds = parse_snmp_response(resp_data)
+        except SnmpError:
+            return None
 
         if err_stat != 0 or not varbinds:
             return None
@@ -402,7 +448,10 @@ class SnmpClient:
         curr_tuple = oid_to_tuple(curr_oid)
 
         for _ in range(max_rows):
-            nxt = self.get_next(curr_oid)
+            try:
+                nxt = self.get_next(curr_oid)
+            except SnmpError:
+                break
             if nxt is None:
                 break
             next_oid, val = nxt

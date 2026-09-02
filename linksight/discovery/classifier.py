@@ -64,10 +64,16 @@ SWITCH_KEYWORDS = [
 ]
 
 
-def classify_device(sys_descr: str, sys_name: str = "", sys_object_id: str = "") -> str:
+def classify_device(
+    sys_descr: str,
+    sys_name: str = "",
+    sys_object_id: str = "",
+    has_bridge_or_stp: bool = False,
+    has_lldp_cdp: bool = False,
+) -> str:
     """Classify device into 'firewall', 'router', 'switch', or 'unknown'.
 
-    Evaluation order: firewall -> router -> switch.
+    Evaluation order: firewall -> router -> switch -> MIB evidence -> unknown.
     """
     text = f"{sys_descr} {sys_name} {sys_object_id}".lower()
 
@@ -83,7 +89,10 @@ def classify_device(sys_descr: str, sys_name: str = "", sys_object_id: str = "")
         if kw in text:
             return "switch"
 
-    return "switch"
+    if has_bridge_or_stp or has_lldp_cdp:
+        return "switch"
+
+    return "unknown"
 
 
 def is_edge_device(device_type: str) -> bool:

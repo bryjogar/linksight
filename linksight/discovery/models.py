@@ -37,8 +37,8 @@ class PortDiagnostics:
 
     @property
     def effective_pvid(self) -> int | None:
-        """Effective PVID: dot1qPvid if set, else fallback to first untagged VLAN for display."""
-        if self.pvid is not None:
+        """Effective PVID: dot1qPvid if set (>0), else fallback to first untagged VLAN for display."""
+        if self.pvid is not None and self.pvid > 0:
             return self.pvid
         if self.untagged_vlans:
             return self.untagged_vlans[0]
