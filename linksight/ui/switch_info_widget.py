@@ -106,7 +106,6 @@ class SwitchInfoWidget(QWidget):
             ("Model / Platform", dev.platform or ""),
             ("System description", dev.system_description or ""),
             ("Switch port", port),
-            ("Port ID (raw)", dev.port_id or ""),
             ("VLAN ID", str(dev.vlan) if dev.vlan is not None else ""),
             ("Mgmt IP address", ", ".join(dev.management_ips)),
             ("Protocol", dev.protocol.upper()),
