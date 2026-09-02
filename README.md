@@ -12,6 +12,15 @@ Plug into an Ethernet port and LinkSight presents the network environment in thr
 
 No historical logs, no active scanning, and no background tracking — LinkSight operates as an in-memory readout. Packet capture starts automatically upon launch on the preferred adapter, and selecting a different interface from the dropdown updates the capture stream live.
 
+## Upstream Discovery
+
+Starting from the switch LinkSight discovers passively, **Upstream Discovery** traces the physical switch chain upstream to the network edge (core switch / STP root / default gateway router or firewall).
+
+- **Per-hop diagnostics:** Each hop provides per-port diagnostic data including PVID (native VLAN), allowed VLANs, STP port state (forwarding, blocking, learning, listening), negotiated link speed (with warnings for <1000 Mbps links), and connected neighbor identity.
+- **STP Root Direction Rule:** Discovery walks strictly along each switch's spanning tree root port (`dot1dStpRootPort`), preventing recursion into downstream IDF switches. The walk terminates cleanly when reaching the STP root bridge or an edge router/firewall.
+- **Privacy & In-Memory Credentials:** The SNMP read community is prompted once when starting discovery, stored only in RAM for the process lifetime, and is never written to disk, configuration files, or sent to external servers.
+- **Prerequisites & Fallback:** Requires SNMP v2c read access on the managed switches. If an intermediate switch does not have SNMP enabled or does not respond, discovery stops gracefully at that hop and presents the last reachable segment.
+
 ## Design
 
 Dark, engineering-focused UI designed for readability, high information density, and instant status assessment.
@@ -65,8 +74,8 @@ linksight-onefile.spec  PyInstaller spec (Windows single-file with slimmed Qt de
 linksight-mac.spec      PyInstaller spec (macOS bundle)
 linksight/
   capture/              Packet sniffing (Scapy), interface enumeration, Npcap helper, demo replay
+  discovery/            SNMP upstream walker, classifier, pure-Python client, models, demo fixtures
   parse/                LLDP, CDP, and DHCP frame parsers and data models
   ui/                   PySide6 readout widgets, styling, and controller
 tests/                  pytest suite and byte-accurate frame fixtures
 ```
-

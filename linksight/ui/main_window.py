@@ -1,19 +1,21 @@
-"""Main window — clean readout: NIC status, LAN info, switch info."""
+"""Main window — clean readout: NIC status, LAN info, switch info, upstream path."""
 
 from __future__ import annotations
 
 import sys
+import time
 
-from PySide6.QtCore import Qt, QSize, QEvent, QTimer
+from PySide6.QtCore import Qt, QSize, QEvent, QTimer, QThread, Signal
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                               QMessageBox, QLabel,
+                               QMessageBox, QLabel, QLineEdit,
                                QPushButton, QComboBox, QStatusBar,
-                               QDialog)
+                               QDialog, QInputDialog)
 
 from .controller import AppController
 from .nic_status_widget import NicStatusWidget
 from .lan_info_widget import LanInfoWidget
 from .switch_info_widget import SwitchInfoWidget
+from .upstream_widget import UpstreamWidget
 from .feed_widget import FeedWidget
 from .settings_widget import SettingsWidget
 
@@ -24,15 +26,53 @@ from .ssh_terminal import launch_ssh_terminal
 from .update_event import UpdateAvailableEvent
 
 
+class UpstreamWorker(QThread):
+    """Background worker thread for upstream discovery walks."""
+
+    progress = Signal(str)
+    finished = Signal(object)
+
+    def __init__(self, start_ip: str, community: str, is_demo: bool = False, parent=None):
+        super().__init__(parent)
+        self.start_ip = start_ip
+        # RAM-only community: kept strictly in memory for this worker
+        self.community = community
+        self.is_demo = is_demo
+
+    def run(self) -> None:
+        if self.is_demo:
+            from ..discovery.demo import get_demo_path
+            self.progress.emit(f"Querying hop 1: {self.start_ip} (Access-SW2)…")
+            time.sleep(0.3)
+            self.progress.emit("Querying hop 2: 10.0.0.2 (Core-SW1)…")
+            time.sleep(0.3)
+            self.progress.emit("STP Root reached. Querying edge firewall…")
+            time.sleep(0.2)
+            path = get_demo_path(self.start_ip)
+            self.finished.emit(path)
+        else:
+            from ..discovery.walker import UpstreamWalker
+            walker = UpstreamWalker(community=self.community)
+            path = walker.walk(
+                self.start_ip,
+                progress_callback=lambda msg: self.progress.emit(msg),
+            )
+            self.finished.emit(path)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, controller: AppController, demo: bool = False):
         super().__init__()
         self.controller = controller
         self.demo = demo
+        self._session_community: str | None = None  # RAM-only process lifetime
+        self._current_walk_ip: str = ""
+        self._upstream_worker: UpstreamWorker | None = None
+
         self.setWindowTitle("LinkSight — LLDP/CDP Neighbor Discovery")
         self.setWindowIcon(self._app_icon())
-        self.setMinimumSize(1080, 720)
-        self.resize(1280, 840)
+        self.setMinimumSize(1080, 750)
+        self.resize(1280, 880)
 
         self._setup_ui()
         self._setup_statusbar()
@@ -44,6 +84,8 @@ class MainWindow(QMainWindow):
         self.nic_widget.selection_changed.connect(self._on_nic_selected)
         self.iface_combo.currentIndexChanged.connect(self._on_iface_changed)
         self.switch_widget.ssh_requested.connect(self._on_ssh_requested)
+        self.switch_widget.upstream_requested.connect(self._on_upstream_requested)
+        self.upstream_widget.refresh_requested.connect(self._on_upstream_refresh)
 
         # seed LAN info with the preferred interface
         preferred = self.iface_combo.currentData()
@@ -127,7 +169,11 @@ class MainWindow(QMainWindow):
         self.switch_widget = SwitchInfoWidget()
         info_row.addWidget(self.lan_widget, 1, Qt.AlignTop)
         info_row.addWidget(self.switch_widget, 1, Qt.AlignTop)
-        main_layout.addLayout(info_row, stretch=1)
+        main_layout.addLayout(info_row, stretch=0)
+
+        # Upstream Discovery readout
+        self.upstream_widget = UpstreamWidget()
+        main_layout.addWidget(self.upstream_widget, stretch=1)
 
         # Raw frame feed (collapsed-ish, for debugging)
         self.feed_widget = FeedWidget()
@@ -256,8 +302,6 @@ class MainWindow(QMainWindow):
     def _on_ssh_requested(self, ip: str) -> None:
         """Ask for the SSH username (the terminal prompts for the password),
         then open a terminal running ssh — nothing is stored."""
-        from PySide6.QtWidgets import QInputDialog
-
         username, ok = QInputDialog.getText(
             self, f"SSH to {ip}",
             "Username (the terminal will ask for the password):",
@@ -268,10 +312,66 @@ class MainWindow(QMainWindow):
         if not ok_launch:
             QMessageBox.warning(self, "LinkSight — SSH", msg)
 
+    def _on_upstream_requested(self, start_ip: str) -> None:
+        """Trigger an upstream discovery walk starting from start_ip."""
+        if not start_ip:
+            if self.switch_widget._current_mgmt_ip:
+                start_ip = self.switch_widget._current_mgmt_ip
+            else:
+                QMessageBox.information(
+                    self,
+                    "LinkSight — Upstream Discovery",
+                    "No switch management IP detected.",
+                )
+                return
+
+        if self.demo:
+            community = "public"
+        else:
+            if not self._session_community:
+                community_in, ok = QInputDialog.getText(
+                    self,
+                    "LinkSight — Upstream Discovery",
+                    f"SNMP Read Community (v2c) for {start_ip}:\n(Kept in memory for this session only, never saved)",
+                    QLineEdit.EchoMode.Normal,
+                    "public",
+                )
+                if not ok or not community_in.strip():
+                    return
+                self._session_community = community_in.strip()
+            community = self._session_community
+
+        self._current_walk_ip = start_ip
+        self.upstream_widget.set_status(f"Starting discovery from {start_ip}…")
+        self.controller.on_upstream_started(start_ip)
+
+        self._upstream_worker = UpstreamWorker(start_ip, community, is_demo=self.demo, parent=self)
+        self._upstream_worker.progress.connect(self._on_discovery_progress)
+        self._upstream_worker.finished.connect(self._on_discovery_finished)
+        self._upstream_worker.start()
+
+    def _on_upstream_refresh(self) -> None:
+        ip = self._current_walk_ip or self.switch_widget._current_mgmt_ip
+        if ip:
+            self._on_upstream_requested(ip)
+        else:
+            QMessageBox.information(
+                self,
+                "LinkSight — Upstream Discovery",
+                "No active switch to discover.",
+            )
+
+    def _on_discovery_progress(self, msg: str) -> None:
+        self.upstream_widget.set_status(msg)
+        self.controller.on_upstream_progress(msg)
+
+    def _on_discovery_finished(self, path) -> None:
+        self.upstream_widget.show_path(path)
+        self.controller.on_upstream_finished(path)
+
     def _on_capture_error(self, msg: str) -> None:
         self.top_status.setText("Capture error")
         QMessageBox.critical(self, "LinkSight — Capture Error", msg)
-
 
     def _check_for_updates(self) -> None:
         """Check GitHub for a newer build — runs in background."""
@@ -315,5 +415,8 @@ class MainWindow(QMainWindow):
         return super().event(event)
 
     def closeEvent(self, event):
+        if self._upstream_worker and self._upstream_worker.isRunning():
+            self._upstream_worker.terminate()
+            self._upstream_worker.wait(1000)
         self.controller.close()
         super().closeEvent(event)

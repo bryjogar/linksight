@@ -10,6 +10,7 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, Signal
 
 from ..parse.model import NeighborDevice
+from ..discovery.models import UpstreamPath
 
 
 class AppController(QObject):
@@ -19,12 +20,16 @@ class AppController(QObject):
     dhcp_seen = Signal(object, object)    # (DhcpObservation, raw_bytes)
     capture_error = Signal(str)
     capture_state_changed = Signal(bool)  # True = running
+    upstream_discovery_started = Signal(str)
+    upstream_discovery_progress = Signal(str)
+    upstream_discovery_finished = Signal(object)  # UpstreamPath
 
     def __init__(self):
         super().__init__()
         self.source = None  # Sniffer or DemoSource, set by main_window
         self.switch: NeighborDevice | None = None   # latest LLDP/CDP neighbor
         self.network: dict = {}                     # observed DHCP facts
+        self.upstream_path: UpstreamPath | None = None
         self.frames: int = 0
 
     def on_device(self, dev: NeighborDevice, raw: bytes | None = None) -> None:
@@ -47,6 +52,16 @@ class AppController(QObject):
 
     def on_error(self, msg: str) -> None:
         self.capture_error.emit(msg)
+
+    def on_upstream_started(self, start_ip: str) -> None:
+        self.upstream_discovery_started.emit(start_ip)
+
+    def on_upstream_progress(self, msg: str) -> None:
+        self.upstream_discovery_progress.emit(msg)
+
+    def on_upstream_finished(self, path: UpstreamPath) -> None:
+        self.upstream_path = path
+        self.upstream_discovery_finished.emit(path)
 
     def close(self) -> None:
         if self.source:

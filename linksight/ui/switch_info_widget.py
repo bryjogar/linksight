@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, QLabel,
-                               QGroupBox, QSizePolicy, QHBoxLayout)
+                               QGroupBox, QSizePolicy, QHBoxLayout, QPushButton)
 
 from ..capture.oui_lookup import lookup_vendor
 from .theme import FG, FG_DIM, FG_FAINT, ACCENT, MONO
@@ -25,7 +25,8 @@ def _row(label: str, value: str):
 
 
 class SwitchInfoWidget(QWidget):
-    ssh_requested = Signal(str)  # management IP the user clicked
+    ssh_requested = Signal(str)            # management IP the user clicked
+    upstream_requested = Signal(str)       # start management IP for upstream walk
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -36,12 +37,36 @@ class SwitchInfoWidget(QWidget):
         # hug content vertically — no dead space below the rows
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
 
-        self.grid = QGridLayout(self.group)
+        self._current_mgmt_ip: str = ""
+
+        self.panel_layout = QVBoxLayout(self.group)
+        self.panel_layout.setContentsMargins(4, 4, 4, 6)
+        self.panel_layout.setSpacing(6)
+
+        self.grid_widget = QWidget()
+        self.grid = QGridLayout(self.grid_widget)
         self.grid.setHorizontalSpacing(24)
         self.grid.setVerticalSpacing(2)
         self.grid.setContentsMargins(2, 0, 2, 4)
+        self.panel_layout.addWidget(self.grid_widget)
+
+        # Action bar with Upstream Discovery trigger
+        action_bar = QHBoxLayout()
+        action_bar.setContentsMargins(2, 2, 2, 2)
+        self.upstream_btn = QPushButton("Discover Upstream Path")
+        self.upstream_btn.setObjectName("tool")
+        self.upstream_btn.setToolTip("Walk the LAN switch chain upstream via SNMP towards the STP root / gateway")
+        self.upstream_btn.setEnabled(False)
+        self.upstream_btn.clicked.connect(self._on_upstream_clicked)
+        action_bar.addWidget(self.upstream_btn)
+        action_bar.addStretch(1)
+        self.panel_layout.addLayout(action_bar)
 
         self.clear()
+
+    def _on_upstream_clicked(self) -> None:
+        if self._current_mgmt_ip:
+            self.upstream_requested.emit(self._current_mgmt_ip)
 
     def show_device(self, dev) -> None:
         raw = dev.raw_tlvs or {}
@@ -64,7 +89,19 @@ class SwitchInfoWidget(QWidget):
         ]
         self._render(rows)
 
+        if dev.management_ips:
+            self._current_mgmt_ip = dev.management_ips[0]
+            self.upstream_btn.setEnabled(True)
+            self.upstream_btn.setToolTip(f"Walk upstream switches starting from {self._current_mgmt_ip}")
+        else:
+            self._current_mgmt_ip = ""
+            self.upstream_btn.setEnabled(False)
+            self.upstream_btn.setToolTip("No management IP discovered on switch")
+
     def clear(self) -> None:
+        self._current_mgmt_ip = ""
+        self.upstream_btn.setEnabled(False)
+        self.upstream_btn.setToolTip("No switch detected")
         self._render([
             ("Hostname", ""),
             ("Model / Platform", ""),
