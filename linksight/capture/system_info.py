@@ -53,6 +53,13 @@ def _run(cmd: list[str], timeout: int = 8) -> str:
         return ""
 
 
+def get_quick_interface_config(iface_name: str) -> InterfaceConfig:
+    """Fast, non-blocking interface config from psutil only (no subprocesses)."""
+    cfg = InterfaceConfig(name=iface_name)
+    _fill_from_psutil(cfg, iface_name)
+    return cfg
+
+
 def get_interface_config(iface_name: str) -> InterfaceConfig:
     """Best-effort current configuration for one interface."""
     cfg = InterfaceConfig(name=iface_name)
@@ -73,7 +80,7 @@ def _fill_from_psutil(cfg: InterfaceConfig, iface_name: str) -> None:
         return
     try:
         for name, addrs in psutil.net_if_addrs().items():
-            if name != iface_name:
+            if name.lower() != iface_name.lower():
                 continue
             for addr in addrs:
                 fam = addr.family.name

@@ -57,6 +57,10 @@ class Sniffer:
     def stop(self) -> None:
         self._stop.set()
 
+    def wait(self, timeout: float | None = 1.0) -> None:
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
     def is_running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
 

@@ -30,8 +30,14 @@ class NetInterface:
         return f"{self.name} ({', '.join(extras)})" if extras else self.name
 
 
-def list_interfaces() -> list[NetInterface]:
+def list_interfaces(reload: bool = False) -> list[NetInterface]:
     """Enumerate network interfaces, best-effort across platforms."""
+    if reload:
+        try:
+            from scapy.all import conf
+            conf.ifaces.reload()
+        except Exception:
+            pass
     ifaces = _via_scapy()
     if ifaces:
         return ifaces
@@ -93,6 +99,15 @@ def _via_scapy() -> list[NetInterface]:
         return []
     out: list[NetInterface] = []
     try:
+        ps_stats = {}
+        ps_addrs = {}
+        try:
+            import psutil
+            ps_stats = psutil.net_if_stats()
+            ps_addrs = psutil.net_if_addrs()
+        except Exception:
+            pass
+
         for iface in conf.ifaces.values():
             name = getattr(iface, "name", "") or ""
             if not name:
@@ -101,6 +116,43 @@ def _via_scapy() -> list[NetInterface]:
             raw_ip = getattr(iface, "ip", "") or ""
             ips = [raw_ip] if isinstance(raw_ip, str) and raw_ip else []
             desc = getattr(iface, "description", "") or ""
+            win_name = getattr(iface, "win_name", "") or ""
+
+            # Check psutil for live link state and addresses
+            matched_stats = (
+                ps_stats.get(name)
+                or ps_stats.get(desc)
+                or (ps_stats.get(win_name) if win_name else None)
+            )
+            matched_addrs = (
+                ps_addrs.get(name)
+                or ps_addrs.get(desc)
+                or (ps_addrs.get(win_name) if win_name else None)
+            )
+
+            is_up = True
+            if matched_stats is not None:
+                is_up = bool(matched_stats.isup)
+            else:
+                try:
+                    from pathlib import Path
+                    oper_file = Path("/sys/class/net") / name / "operstate"
+                    if oper_file.exists():
+                        is_up = oper_file.read_text().strip() == "up"
+                except Exception:
+                    pass
+
+            if matched_addrs:
+                live_ips = []
+                for addr in matched_addrs:
+                    fam = addr.family.name
+                    if fam in ("AF_INET", "AF_INET6") and addr.address:
+                        live_ips.append(addr.address)
+                    elif ("MAC" in fam or fam == "AF_LINK") and not mac:
+                        mac = addr.address
+                if live_ips:
+                    ips = live_ips
+
             first_ip = ips[0] if ips else ""
             is_loopback = name.lower().startswith(("lo", "loopback")) or first_ip.startswith("127.")
             out.append(NetInterface(
@@ -108,6 +160,7 @@ def _via_scapy() -> list[NetInterface]:
                 mac=mac,
                 ips=ips,
                 description=desc,
+                is_up=is_up,
                 is_loopback=is_loopback,
             ))
     except Exception:
@@ -123,6 +176,10 @@ def _via_psutil() -> list[NetInterface]:
         return []
     out: list[NetInterface] = []
     try:
+        stats = psutil.net_if_stats()
+    except Exception:
+        stats = {}
+    try:
         for name, snic in psutil.net_if_addrs().items():
             mac = ""
             ips: list[str] = []
@@ -134,7 +191,8 @@ def _via_psutil() -> list[NetInterface]:
                     ips.append(addr.address)
             first_ip = ips[0] if ips else ""
             is_loopback = name.lower().startswith(("lo", "loopback")) or first_ip.startswith("127.")
-            out.append(NetInterface(name=name, mac=mac, ips=ips, is_loopback=is_loopback))
+            is_up = stats[name].isup if name in stats else True
+            out.append(NetInterface(name=name, mac=mac, ips=ips, is_up=is_up, is_loopback=is_loopback))
     except Exception:
         return []
     return out

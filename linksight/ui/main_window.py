@@ -20,9 +20,10 @@ from .upstream_widget import UpstreamWidget
 from .feed_widget import FeedWidget
 from .settings_widget import SettingsWidget
 
-from ..capture.interfaces import list_interfaces, preferred_interface
+from ..capture.interfaces import list_interfaces, preferred_interface, NetInterface
 from ..capture.sniffer import Sniffer
 from ..capture.demo import DemoSource
+from .interface_watcher import InterfaceWatcher
 from .ssh_terminal import launch_ssh_terminal
 from .update_event import UpdateAvailableEvent
 
@@ -87,14 +88,16 @@ class ArpResolveWorker(QThread):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, controller: AppController, demo: bool = False):
+    def __init__(self, controller: AppController, demo: bool = False, state_provider=None):
         super().__init__()
         self.controller = controller
         self.demo = demo
+        self._state_provider = state_provider
         self._session_community: str | None = None  # RAM-only process lifetime
         self._current_walk_ip: str = ""
         self._upstream_worker: UpstreamWorker | None = None
         self._arp_worker: ArpResolveWorker | None = None
+        self._last_capture_error_time: float = 0.0
 
         self.setWindowTitle("LinkSight — LLDP/CDP Neighbor Discovery")
         self.setWindowIcon(self._app_icon())
@@ -126,6 +129,9 @@ class MainWindow(QMainWindow):
 
         # capture starts automatically
         self._start()
+
+        # link-state and interface watcher
+        self._setup_watcher()
 
     # ── UI construction ──
 
@@ -192,7 +198,7 @@ class MainWindow(QMainWindow):
 
         info_row = QHBoxLayout()
         info_row.setSpacing(4)
-        self.lan_widget = LanInfoWidget()
+        self.lan_widget = LanInfoWidget(controller=self.controller)
         self.switch_widget = SwitchInfoWidget()
         info_row.addWidget(self.lan_widget, 1, Qt.AlignTop)
         info_row.addWidget(self.switch_widget, 1, Qt.AlignTop)
@@ -262,7 +268,8 @@ class MainWindow(QMainWindow):
         else:
             iface = self.iface_combo.currentData()
             if not iface:
-                QMessageBox.warning(self, "LinkSight", "No network interface available.")
+                self.top_status.setText("No network interface available")
+                self.top_status.setStyleSheet("color: #808080; font-size: 12px;")
                 return
             if sys.platform == "win32":
                 from ..capture import npcap
@@ -285,13 +292,31 @@ class MainWindow(QMainWindow):
             self.controller.source.start()
         self.controller.capture_state_changed.emit(True)
         self.top_status.setText("Listening…" if not self.demo else "Replaying demo scenario…")
+        self.top_status.setStyleSheet("color: #808080; font-size: 12px;")
+        self.top_status.setToolTip("")
+        self.status_left.setText("")
+
+    def _restart_capture(self) -> None:
+        if self.demo:
+            return
+        if self.controller.source is not None:
+            self.controller.source.stop()
+            if hasattr(self.controller.source, "wait"):
+                self.controller.source.wait(1.0)
+            self.controller.source = None
+        self._start()
 
     def _on_iface_changed(self) -> None:
         """Restart capture on the newly selected interface (always-on)."""
         if self.controller.source is not None:
             self.controller.source.stop()
+            if hasattr(self.controller.source, "wait"):
+                self.controller.source.wait(1.0)
             self.controller.source = None
         self._start()
+        active = self.iface_combo.currentData() or ""
+        if hasattr(self, "_watcher") and self._watcher is not None:
+            self._watcher.set_active_interface(active)
         # refresh LAN info for the new adapter
         row = self.nic_widget.table.currentIndex().row()
         nic = self.nic_widget.model.nic_at(row) if row >= 0 else None
@@ -304,6 +329,63 @@ class MainWindow(QMainWindow):
                     mac = n.mac
                     break
             self.lan_widget.set_interface(self.iface_combo.currentData(), mac)
+
+    def _setup_watcher(self) -> None:
+        active_iface = self.iface_combo.currentData() or ""
+        self._watcher = InterfaceWatcher(
+            active_interface=active_iface,
+            state_provider=self._state_provider,
+            poll_interval_ms=2000,
+            parent=self,
+        )
+        self._watcher.interfaces_changed.connect(self._on_interfaces_changed)
+        self._watcher.capture_restart_needed.connect(self._on_capture_restart_needed)
+        self._watcher.start()
+
+    def _on_interfaces_changed(self, nics: list[NetInterface]) -> None:
+        self.interfaces = nics
+        # a. Update NIC table model in place (preserving selection)
+        self.nic_widget.refresh(nics)
+
+        # Update iface_combo items without resetting selection
+        current = self.iface_combo.currentData()
+        self.iface_combo.blockSignals(True)
+        self.iface_combo.clear()
+        for nic in self.interfaces:
+            self.iface_combo.addItem(nic.label(), nic.name)
+        if current:
+            idx = self.iface_combo.findData(current)
+            if idx >= 0:
+                self.iface_combo.setCurrentIndex(idx)
+        self.iface_combo.blockSignals(False)
+
+        # b. Refresh LAN info widget (non-blocking)
+        self.lan_widget.refresh()
+
+    def _on_capture_restart_needed(self, iface_name: str) -> None:
+        if self.demo:
+            return
+
+        current = self.iface_combo.currentData()
+        available_names = [nic.name for nic in self.interfaces]
+        if not current or current not in available_names:
+            # Active interface no longer exists; try switching to preferred
+            preferred = preferred_interface(self.interfaces)
+            if preferred is not None:
+                idx = self.iface_combo.findData(preferred.name)
+                if idx >= 0:
+                    self.iface_combo.setCurrentIndex(idx)
+                    return
+            if self.controller.source is not None:
+                self.controller.source.stop()
+                if hasattr(self.controller.source, "wait"):
+                    self.controller.source.wait(1.0)
+                self.controller.source = None
+            self.top_status.setText("No network interface available")
+            return
+
+        # Active interface recovered from down to up (debounced)
+        self._restart_capture()
 
     # ── slots ──
 
@@ -439,8 +521,17 @@ class MainWindow(QMainWindow):
         self.controller.on_upstream_finished(path)
 
     def _on_capture_error(self, msg: str) -> None:
+        now = time.monotonic()
+        if now - getattr(self, "_last_capture_error_time", 0.0) < 5.0:
+            return
+        self._last_capture_error_time = now
+
         self.top_status.setText("Capture error")
-        QMessageBox.critical(self, "LinkSight — Capture Error", msg)
+        self.top_status.setStyleSheet("color: #ef4444; font-size: 12px;")
+        self.top_status.setToolTip(msg)
+        summary = msg.splitlines()[0] if msg else ""
+        self.status_left.setText(f"Capture error: {summary}")
+        self.statusbar.showMessage(f"Capture error: {summary}", 5000)
 
     def _check_for_updates(self) -> None:
         """Check GitHub for a newer build — runs in background."""
@@ -484,6 +575,8 @@ class MainWindow(QMainWindow):
         return super().event(event)
 
     def closeEvent(self, event):
+        if hasattr(self, "_watcher") and self._watcher is not None:
+            self._watcher.stop()
         if self._upstream_worker and self._upstream_worker.isRunning():
             self._upstream_worker.terminate()
             self._upstream_worker.wait(1000)

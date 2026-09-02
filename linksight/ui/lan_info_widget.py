@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+import time
+from PySide6.QtCore import Qt, Signal, QTimer, QThread
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, QLabel,
                                QGroupBox, QSizePolicy)
 
-from ..capture.system_info import get_interface_config
+from ..capture.system_info import (
+    get_interface_config,
+    get_quick_interface_config,
+    InterfaceConfig,
+)
 from ..capture.oui_lookup import lookup_vendor
 from .theme import FG, FG_DIM, FG_FAINT, ACCENT, MONO
 
@@ -25,12 +30,37 @@ def _row(label: str, value: str):
     return lbl, val
 
 
+class InterfaceConfigWorker(QThread):
+    """Background worker thread for fetching interface configuration without blocking UI."""
+
+    finished = Signal(object)  # InterfaceConfig
+
+    def __init__(self, iface_name: str, parent=None):
+        super().__init__(parent)
+        self.iface_name = iface_name
+
+    def run(self) -> None:
+        cfg = get_interface_config(self.iface_name)
+        self.finished.emit(cfg)
+
+
 class LanInfoWidget(QWidget):
-    def __init__(self, parent=None):
+    config_updated = Signal(object)
+
+    def __init__(self, controller=None, parent=None):
         super().__init__(parent)
         self._iface_name = ""
         self._mac_override = ""
-        self.controller = None  # set by main_window for DHCP observation
+        self.controller = controller  # set by main_window for DHCP observation
+        self._cached_cfg: InterfaceConfig | None = None
+        self._worker: InterfaceConfigWorker | None = None
+        self._last_bg_completed: float = 0.0
+        self._pending_refresh: bool = False
+        self._min_interval: float = 1.5
+
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.timeout.connect(self._start_bg_worker)
 
         self.group = QGroupBox("LAN Info")
         layout = QVBoxLayout(self)
@@ -45,12 +75,77 @@ class LanInfoWidget(QWidget):
         self.grid.setContentsMargins(2, 0, 2, 4)
 
     def set_interface(self, iface_name: str, mac: str = "") -> None:
-        self._iface_name = iface_name
-        self._mac_override = mac
-        self.refresh()
+        if self._iface_name != iface_name or self._cached_cfg is None:
+            self._iface_name = iface_name
+            self._mac_override = mac
+            # Initial render: psutil-level data (fast, no subprocess)
+            self._cached_cfg = get_quick_interface_config(iface_name) if iface_name else None
+            if self._cached_cfg and mac and not self._cached_cfg.mac:
+                self._cached_cfg.mac = mac
+            self._render_current()
+            # Kick background fetch to enrich with ipconfig/DHCP details
+            self._request_bg_refresh(immediate=True)
+        else:
+            if mac and self._mac_override != mac:
+                self._mac_override = mac
+                if self._cached_cfg and not self._cached_cfg.mac:
+                    self._cached_cfg.mac = mac
+            self._render_current()
 
     def refresh(self) -> None:
-        cfg = get_interface_config(self._iface_name) if self._iface_name else None
+        """Render from cached data immediately, then request debounced background refresh."""
+        if self._cached_cfg is None and self._iface_name:
+            self._cached_cfg = get_quick_interface_config(self._iface_name)
+            if self._mac_override and not self._cached_cfg.mac:
+                self._cached_cfg.mac = self._mac_override
+        self._render_current()
+        self._request_bg_refresh(immediate=False)
+
+    def _request_bg_refresh(self, immediate: bool = False) -> None:
+        if not self._iface_name:
+            return
+
+        if self._worker is not None and self._worker.isRunning():
+            self._pending_refresh = True
+            return
+
+        now = time.monotonic()
+        elapsed = now - self._last_bg_completed
+
+        if immediate or elapsed >= self._min_interval:
+            self._debounce_timer.stop()
+            self._start_bg_worker()
+        else:
+            remaining_ms = int(max(100, (self._min_interval - elapsed) * 1000))
+            if not self._debounce_timer.isActive():
+                self._debounce_timer.start(remaining_ms)
+
+    def _start_bg_worker(self) -> None:
+        if not self._iface_name:
+            return
+        if self._worker is not None and self._worker.isRunning():
+            self._pending_refresh = True
+            return
+
+        self._worker = InterfaceConfigWorker(self._iface_name, parent=self)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.start()
+
+    def _on_worker_finished(self, cfg: InterfaceConfig) -> None:
+        self._last_bg_completed = time.monotonic()
+        if cfg and cfg.name == self._iface_name:
+            self._cached_cfg = cfg
+            self._render_current()
+            self.config_updated.emit(cfg)
+
+        self._worker = None
+
+        if self._pending_refresh:
+            self._pending_refresh = False
+            self._debounce_timer.start(int(self._min_interval * 1000))
+
+    def _render_current(self) -> None:
+        cfg = self._cached_cfg
         net = self.controller.network if self.controller else {}
 
         mac = self._mac_override or (cfg.mac if cfg else "")
@@ -90,3 +185,11 @@ class LanInfoWidget(QWidget):
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+
+    def closeEvent(self, event) -> None:
+        if self._debounce_timer.isActive():
+            self._debounce_timer.stop()
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.terminate()
+            self._worker.wait(500)
+        super().closeEvent(event)

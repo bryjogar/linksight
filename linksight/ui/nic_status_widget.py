@@ -20,6 +20,11 @@ class NicModel(QAbstractTableModel):
     def rowCount(self, parent=...):
         return len(self._nics)
 
+    def update_nics(self, nics: list[NetInterface]) -> None:
+        self.beginResetModel()
+        self._nics = list(nics)
+        self.endResetModel()
+
     def columnCount(self, parent=...):
         return len(self.HEADERS)
 
@@ -95,3 +100,32 @@ class NicStatusWidget(QWidget):
             return
         nic = self.model.nic_at(idxs[0].row())
         self.selection_changed.emit(nic)
+
+    def refresh(self, nics: list[NetInterface] | None = None) -> None:
+        """Update interface list while safely preserving selection if the adapter is still present."""
+        if nics is None:
+            nics = list_interfaces()
+
+        selected_name = None
+        current_idx = self.table.currentIndex()
+        if current_idx.isValid():
+            selected_nic = self.model.nic_at(current_idx.row())
+            if selected_nic:
+                selected_name = selected_nic.name
+
+        self.nics = list(nics)
+        self.model.update_nics(self.nics)
+
+        if selected_name:
+            for row, nic in enumerate(self.nics):
+                if nic.name == selected_name:
+                    from PySide6.QtCore import QItemSelectionModel
+                    idx = self.model.index(row, 0)
+                    self.table.selectionModel().setCurrentIndex(
+                        idx,
+                        QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows
+                    )
+                    break
+
+    def update_interfaces(self, nics: list[NetInterface]) -> None:
+        self.refresh(nics)
