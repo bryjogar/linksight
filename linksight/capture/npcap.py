@@ -46,13 +46,24 @@ def npcap_installed() -> bool | None:
     return any(Path(d).exists() for d in NPCAP_INSTALL_DIRS)
 
 
-def download_installer(dest: Path | None = None) -> Path:
-    """Download the official Npcap installer; returns the local file path."""
+def download_installer(dest: Path | None = None, timeout: float = 60.0) -> Path:
+    """Download the official Npcap installer; returns the local file path.
+
+    Streams to disk with an overall socket timeout so a stalled link fails
+    instead of hanging forever (the caller runs this off the UI thread).
+    """
     import urllib.request
 
     dest = dest or Path(tempfile.gettempdir()) / "npcap-installer.exe"
     print(f"Downloading Npcap installer from {NPCAP_DIST_URL} ...")
-    urllib.request.urlretrieve(NPCAP_DIST_URL, dest)
+    req = urllib.request.Request(NPCAP_DIST_URL, headers={"User-Agent": "LinkSight/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open(dest, "wb") as fh:
+            while True:
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                fh.write(chunk)
     print(f"Downloaded to {dest}")
     return dest
 
