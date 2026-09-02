@@ -1175,3 +1175,59 @@ def test_ui_candidate_button_and_summary_with_bytes_repr_never_leaks_b_repr():
 
 
 
+
+
+def test_main_window_stalled_hop_auto_prompt(monkeypatch):
+    """Walk ends at an ambiguous/unreachable hop with ONE no-IP candidate -> the
+    window auto-opens the manual IP modal and re-walks with the typed address.
+    Regression for the field case: IPv6-only advertised, engineer types IPv4."""
+    app = QApplication.instance() or QApplication([])
+    from linksight.ui.controller import AppController
+    from linksight.ui.main_window import MainWindow
+    from linksight.discovery.models import Hop, PortDiagnostics, UpstreamPath
+    from PySide6.QtWidgets import QInputDialog
+
+    controller = AppController()
+    window = MainWindow(controller, demo=True)
+    try:
+        # No auto-prompt in demo mode by design — force it off by monkeypatching demo
+        monkeypatch.setattr(window, "demo", False)
+        # Stub the sniffer-error modal path that fires when demo=False starts capture
+        monkeypatch.setattr(window, "_on_capture_error", lambda msg: None)
+
+        cand = PortDiagnostics(
+            port_id=47,
+            port_name="Port 47",
+            neighbor_name="UniFi-Switch",
+            neighbor_chassis="74:83:c2:19:6d:a4",
+            neighbor_ip="",
+        )
+        hop = Hop(hop_index=1, hostname="Aruba", mgmt_ip="10.0.0.10", status="ambiguous",
+                  ambiguous_candidates=[cand])
+        path = UpstreamPath(start_ip="10.0.0.10", hops=[hop], edge_type="ambiguous",
+                            edge_summary="stalled", success=False)
+        window._current_walk_ip = "10.0.0.10"
+        window.switch_widget._current_mgmt_ip = "10.0.0.10"
+
+        requests = []
+        monkeypatch.setattr(window, "_on_upstream_requested",
+                            lambda start_ip, **kw: requests.append((start_ip, kw)))
+        monkeypatch.setattr(QInputDialog, "getText",
+                            lambda *a, **k: ("192.168.4.121", True))
+
+        window._maybe_prompt_for_stalled_hop(path)
+
+        assert len(requests) == 1
+        start_ip, kw = requests[0]
+        assert start_ip == "10.0.0.10"
+        assert kw["forced_next_ip"] == "192.168.4.121"
+        assert kw["forced_port_id"] == 47
+        assert kw["forced_hop_ip"] == "10.0.0.10"
+
+        # Second identical stalled path must NOT re-prompt (loop guard)
+        requests.clear()
+        window._maybe_prompt_for_stalled_hop(path)
+        assert len(requests) == 0
+    finally:
+        window.close()
+        controller.close()

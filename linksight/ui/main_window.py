@@ -819,6 +819,74 @@ class MainWindow(QMainWindow):
     def _on_discovery_finished(self, path) -> None:
         self.upstream_widget.show_path(path)
         self.controller.on_upstream_finished(path)
+        self._maybe_prompt_for_stalled_hop(path)
+
+    def _maybe_prompt_for_stalled_hop(self, path) -> None:
+        """When the walk stops because the next switch is identifiable but has no
+        reachable management IP (STP/LLDP pointed at it; SNMP/ARP failed), offer the
+        same manual-IP modal used for the first walk so the engineer can type the
+        address and continue instead of being stuck at a dead-end."""
+        try:
+            if not path or path.success or not path.hops:
+                return
+            if getattr(self, "demo", False):
+                return
+            last = path.hops[-1]
+            # Only auto-prompt when there is exactly ONE clear next hop and it is
+            # missing a usable IP — multi-candidate ambiguity keeps its buttons.
+            if last.status not in ("ambiguous", "unreachable", "timeout"):
+                return
+            candidates = list(getattr(last, "ambiguous_candidates", None) or [])
+            if len(candidates) != 1:
+                # fall back: single uplink port whose neighbor has identity but no IP
+                up = getattr(last, "uplink_port", None)
+                if not up or not (up.neighbor_name or up.neighbor_chassis):
+                    return
+                cand = up
+            else:
+                cand = candidates[0]
+            # Already reachable? (edge cases where neighbor_ip survived)
+            if cand.neighbor_ip:
+                return
+            name = cand.neighbor_name or cand.neighbor_chassis or "switch"
+            port_id = cand.port_id
+            # Skip auto-modal if this exact hop was already asked (avoid loops)
+            ask_key = (getattr(last, "mgmt_ip", ""), port_id)
+            if getattr(self, "_last_stall_prompt", None) == ask_key:
+                return
+            self._last_stall_prompt = ask_key
+            prompt_label = (
+                f"LinkSight could not reach the next switch: {name}.\n"
+                "It did not advertise a reachable management IP.\n\n"
+                "Enter the switch management IPv4 address to continue:"
+            )
+            ip_in, ok = QInputDialog.getText(
+                self,
+                "LinkSight — Continue upstream path",
+                prompt_label,
+                QLineEdit.EchoMode.Normal,
+            )
+            if not ok or not ip_in.strip():
+                return
+            candidate_ip = ip_in.strip()
+            try:
+                ipaddress.IPv4Address(candidate_ip)
+            except ValueError:
+                QMessageBox.warning(self, "LinkSight", "That is not a valid IPv4 address.")
+                return
+            start_ip = getattr(self, "_current_walk_ip", "") or self.switch_widget._current_mgmt_ip
+            if not start_ip:
+                return
+            self._on_upstream_requested(
+                start_ip,
+                forced_next_ip=candidate_ip,
+                forced_port_id=port_id,
+                forced_hop_ip=last.mgmt_ip,
+                forced_candidate=cand,
+            )
+        except Exception:
+            # The prompt is convenience — never let it disrupt the finished path view
+            pass
 
     def _on_capture_error(self, msg: str) -> None:
         now = time.monotonic()

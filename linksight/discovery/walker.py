@@ -784,16 +784,36 @@ class UpstreamWalker:
                 try:
                     for oid, val in client.walk(OID_LLDP_REM_MAN_ADDR_TABLE):
                         parts = oid.strip(".").split(".")
-                        # OID suffix: [..., localPort, remIndex, addrSubtype, addrCount, a, b, c, d]
-                        if len(parts) >= 10:
+                        # OID suffix after table base: [3, 0, localPort, remIndex,
+                        # addrSubtype, addrCount, addr...]. The address occupies the
+                        # last `count` components, so positions shift by address size:
+                        #   IPv4 (count=4):  ... localPort at -8, subtype -6, count -5
+                        #   IPv6 (count=16): localPort at -20, subtype -18, count -17
+                        if len(parts) < 10:
+                            continue
+                        # IPv4 fast path (existing behaviour, fixture-verified)
+                        if len(parts) >= 10 and parts[-5].isdigit() and int(parts[-5]) == 4 and parts[-6] == "1":
                             p_cand = int(parts[-8]) if parts[-8].isdigit() else None
-                            subtype = int(parts[-6]) if parts[-6].isdigit() else None
-                            count = int(parts[-5]) if parts[-5].isdigit() else None
-                            if subtype == 1 and count == 4 and p_cand is not None:
-                                ip_str = ".".join(parts[-4:])
-                                ips_list = port_neighbors.setdefault(p_cand, {}).setdefault("ips", [])
-                                if ip_str not in ips_list:
-                                    ips_list.append(ip_str)
+                            if p_cand is None:
+                                continue
+                            ip_str = ".".join(parts[-4:])
+                            ips_list = port_neighbors.setdefault(p_cand, {}).setdefault("ips", [])
+                            if ip_str not in ips_list:
+                                ips_list.append(ip_str)
+                            continue
+                        # IPv6: count field sits 16 before the end; validate layout
+                        if len(parts) >= 22 and parts[-17].isdigit() and int(parts[-17]) == 16 and parts[-18] == "2":
+                            p_cand = int(parts[-20]) if parts[-20].isdigit() else None
+                            if p_cand is None:
+                                continue
+                            raw = [int(x) for x in parts[-16:]]
+                            ip_str = ":".join(
+                                f"{((raw[i] << 8) | raw[i + 1]):x}"
+                                for i in range(0, 16, 2)
+                            )
+                            ips_list = port_neighbors.setdefault(p_cand, {}).setdefault("ips", [])
+                            if ip_str not in ips_list:
+                                ips_list.append(ip_str)
                 except Exception:
                     pass
 

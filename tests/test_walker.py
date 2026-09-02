@@ -2436,3 +2436,40 @@ def test_walker_stp_disabled_single_upstream_auto_follows():
     assert hop1.uplink_port.neighbor_ip == upstream_ip
     assert result.hops[1].hostname == "UniFi-Switch"
     assert result.hops[1].mgmt_ip == upstream_ip
+
+
+def test_walker_lldp_captures_ipv6_and_ipv4_addresses():
+    """LLDP remote man-addr table rows with BOTH IPv4 and IPv6 (subtype 1 and 2)
+    must all be captured into neighbor_ips — IPv6 must not be silently dropped."""
+    sw_ip = "10.0.0.10"
+    v4 = "192.168.4.120"
+    # fe80::219:6dff:fea4:1234 encoded as 16 octets
+    v6_octets = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x02, 0x19, 0x6d, 0xff, 0xfe, 0xa4, 0x12, 0x34]
+    v6 = ":".join(f"{((v6_octets[i] << 8) | v6_octets[i + 1]):x}" for i in range(0, 16, 2))
+    sw_mib = {
+        OID_SYS_DESCR: "Aruba 2930F-24G-4SFP+ Switch (JL259A), WC.16.10.0016",
+        OID_SYS_NAME: "Aruba-2930F",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.47": 47,
+        f"{OID_IF_NAME}.47": "Port 47",
+        f"{OID_IF_HIGH_SPEED}.47": 1000,
+        f"{OID_LLDP_REM_SYS_NAME}.0.47.1": "UniFi-Switch",
+        f"{OID_LLDP_REM_PORT_ID}.0.47.1": "Port 1",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.47.1": bytes.fromhex("7483c2196da4"),
+        # IPv4 row first, then IPv6 row — both must be captured
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.47.1.1.4.192.168.4.120": 1,
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.47.2.2.16." + ".".join(str(x) for x in v6_octets): 1,
+    }
+    factory = make_mock_client_factory({sw_ip: sw_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip, endpoint_mac="00:11:22:33:44:55")
+
+    # Hop 1 sees the UniFi neighbor on port 47 with both addresses captured
+    hop1 = result.hops[0]
+    unifi_port = next((p for p in hop1.ports if p.port_id == 47), None)
+    assert unifi_port is not None
+    assert v4 in unifi_port.neighbor_ips, f"IPv4 missing: {unifi_port.neighbor_ips}"
+    assert any(":" in ip and ip.startswith("fe80") for ip in unifi_port.neighbor_ips), \
+        f"IPv6 missing: {unifi_port.neighbor_ips}"
+    # Preferred remains the IPv4 management address
+    assert unifi_port.neighbor_ip == v4
