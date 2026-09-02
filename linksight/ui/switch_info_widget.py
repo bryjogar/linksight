@@ -38,6 +38,7 @@ class SwitchInfoWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
 
         self._current_mgmt_ip: str = ""
+        self._mgmt_ip_row_idx: int | None = None
 
         self.panel_layout = QVBoxLayout(self.group)
         self.panel_layout.setContentsMargins(4, 4, 4, 6)
@@ -73,11 +74,24 @@ class SwitchInfoWidget(QWidget):
         if ip:
             self.upstream_btn.setEnabled(True)
             self.upstream_btn.setToolTip(f"Walk upstream switches starting from {ip}")
+            self._update_mgmt_ip_row(ip, is_arp=False)
         else:
             self.upstream_btn.setEnabled(True)
             self.upstream_btn.setToolTip(
                 "No management IP advertised by switch — click to enter the switch management IP"
             )
+            self._update_mgmt_ip_row("", is_arp=False)
+
+    def set_resolved_mgmt_ip(self, ip: str) -> None:
+        """Update the management IP with an auto-resolved ARP address."""
+        if not ip:
+            return
+        self._current_mgmt_ip = ip
+        self.upstream_btn.setEnabled(True)
+        self.upstream_btn.setToolTip(
+            f"Walk upstream switches starting from {ip} (auto-resolved via ARP)"
+        )
+        self._update_mgmt_ip_row(ip, is_arp=True)
 
     def show_device(self, dev) -> None:
         raw = dev.raw_tlvs or {}
@@ -113,6 +127,7 @@ class SwitchInfoWidget(QWidget):
 
     def clear(self) -> None:
         self._current_mgmt_ip = ""
+        self._mgmt_ip_row_idx = None
         self.upstream_btn.setEnabled(False)
         self.upstream_btn.setToolTip("No switch detected")
         self._render([
@@ -127,15 +142,29 @@ class SwitchInfoWidget(QWidget):
 
     def _render(self, rows) -> None:
         self._clear_grid()
+        self._mgmt_ip_row_idx = None
         for i, (label, value) in enumerate(rows):
             lbl, val = _row(label, value)
             if label == "Mgmt IP address":
+                self._mgmt_ip_row_idx = i
                 val = self._mgmt_ip_widget(value)
             self.grid.addWidget(lbl, i, 0)
             self.grid.addWidget(val, i, 1)
         self.grid.setColumnStretch(1, 1)
 
-    def _mgmt_ip_widget(self, value: str) -> QWidget:
+    def _update_mgmt_ip_row(self, ip: str, is_arp: bool = False) -> None:
+        if getattr(self, "_mgmt_ip_row_idx", None) is None:
+            return
+        item = self.grid.itemAtPosition(self._mgmt_ip_row_idx, 1)
+        if item is not None:
+            w = item.widget()
+            if w is not None:
+                self.grid.removeWidget(w)
+                w.deleteLater()
+        new_w = self._mgmt_ip_widget(ip, is_arp=is_arp)
+        self.grid.addWidget(new_w, self._mgmt_ip_row_idx, 1)
+
+    def _mgmt_ip_widget(self, value: str, is_arp: bool = False) -> QWidget:
         """A row of clickable management-IP links."""
         wrap = QWidget()
         lay = QHBoxLayout(wrap)
@@ -154,6 +183,10 @@ class SwitchInfoWidget(QWidget):
             link.setToolTip(f"Click to SSH to {ip}")
             link.linkActivated.connect(lambda _=None, target=ip: self.ssh_requested.emit(target))
             lay.addWidget(link)
+        if is_arp:
+            tag = QLabel("(ARP)")
+            tag.setStyleSheet(f"color: {FG_DIM}; font-family: {MONO}; font-size: 11px;")
+            lay.addWidget(tag)
         lay.addStretch(1)
         return wrap
 

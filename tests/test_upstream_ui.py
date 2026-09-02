@@ -224,6 +224,21 @@ def test_switch_info_widget_upstream_button():
     widget.upstream_btn.click()
     assert emitted_ips == ["192.168.1.50"]
 
+    # 5. Setting auto-resolved management IP updates widget state with (ARP) marker
+    from PySide6.QtWidgets import QLabel
+    widget.set_resolved_mgmt_ip("192.168.1.20")
+    assert widget._current_mgmt_ip == "192.168.1.20"
+    assert widget.upstream_btn.toolTip() == (
+        "Walk upstream switches starting from 192.168.1.20 (auto-resolved via ARP)"
+    )
+    emitted_ips.clear()
+    widget.upstream_btn.click()
+    assert emitted_ips == ["192.168.1.20"]
+    mgmt_widget = widget.grid.itemAtPosition(widget._mgmt_ip_row_idx, 1).widget()
+    labels = [lbl.text() for lbl in mgmt_widget.findChildren(QLabel)]
+    assert any("(ARP)" in t for t in labels)
+    assert any("192.168.1.20" in t for t in labels)
+
 
 def test_main_window_demo_upstream_discovery():
     """Verify MainWindow executes upstream discovery in demo mode without errors."""
@@ -306,6 +321,135 @@ def test_main_window_real_upstream_discovery_prompt(monkeypatch):
         assert window._upstream_worker is not None
         assert window._upstream_worker.start_ip == "192.168.1.10"
         assert window._upstream_worker.community == "public"
+    finally:
+        window.close()
+        controller.close()
+
+
+def test_main_window_arp_resolve_success(monkeypatch):
+    """UI test: show_device with no mgmt IP + mocked resolve result -> _current_mgmt_ip set and tooltip updated."""
+    # demo=False auto-starts a real sniffer; in the headless test env it errors
+    # and would raise a MODAL capture-error dialog that blocks processEvents
+    # forever. Stub the handler — the capture pipeline is not under test here.
+    from linksight.ui import main_window as mw_mod
+    monkeypatch.setattr(mw_mod.MainWindow, "_on_capture_error", lambda self, msg: None)
+
+    app = QApplication.instance() or QApplication([])
+    controller = AppController()
+    window = MainWindow(controller, demo=False)
+
+    try:
+        monkeypatch.setattr(
+            "linksight.discovery.arp_resolve.resolve_switch_mgmt_ip",
+            lambda dev: "192.168.1.20",
+        )
+
+        dev = NeighborDevice(
+            protocol="lldp",
+            source_interface="eth0",
+            system_name="USW-Lite-16-PoE",
+            chassis_id="74:83:c2:11:22:33",
+            management_ips=[],
+            port_id="Port 1",
+        )
+
+        window._on_device(dev)
+
+        assert window._arp_worker is not None
+        window._arp_worker.wait(5000)
+        QCoreApplication.processEvents()
+
+        assert window.switch_widget._current_mgmt_ip == "192.168.1.20"
+        assert window.switch_widget.upstream_btn.isEnabled() is True
+        assert window.switch_widget.upstream_btn.toolTip() == (
+            "Walk upstream switches starting from 192.168.1.20 (auto-resolved via ARP)"
+        )
+    finally:
+        window.close()
+        controller.close()
+
+
+def test_main_window_arp_resolve_none(monkeypatch):
+    """UI test: show_device with no mgmt IP + mocked resolve None -> button enabled, still prompts on click (existing behavior, regression-guarded)."""
+    from PySide6.QtWidgets import QInputDialog
+    from linksight.ui import main_window as mw_mod
+    from linksight.ui.main_window import UpstreamWorker
+
+    # demo=False auto-starts a real sniffer; headless env errors would raise a
+    # MODAL capture-error dialog that blocks processEvents forever.
+    monkeypatch.setattr(mw_mod.MainWindow, "_on_capture_error", lambda self, msg: None)
+
+    app = QApplication.instance() or QApplication([])
+    controller = AppController()
+    window = MainWindow(controller, demo=False)
+
+    try:
+        monkeypatch.setattr(
+            "linksight.discovery.arp_resolve.resolve_switch_mgmt_ip",
+            lambda dev: None,
+        )
+
+        dev = NeighborDevice(
+            protocol="lldp",
+            source_interface="eth0",
+            system_name="USW-Lite-16-PoE",
+            chassis_id="74:83:c2:11:22:33",
+            management_ips=[],
+            port_id="Port 1",
+        )
+
+        window._on_device(dev)
+
+        assert window._arp_worker is not None
+        window._arp_worker.wait(5000)
+        QCoreApplication.processEvents()
+
+        # Resolution failed: button enabled, empty IP, fallback tooltip
+        assert window.switch_widget._current_mgmt_ip == ""
+        assert window.switch_widget.upstream_btn.isEnabled() is True
+        assert window.switch_widget.upstream_btn.toolTip() == (
+            "No management IP advertised by switch — click to enter the switch management IP"
+        )
+
+        # Clicking button prompts for manual IP
+        monkeypatch.setattr(UpstreamWorker, "start", lambda self: None)
+        dialog_responses = [
+            ("192.168.1.77", True),
+            ("public", True),
+        ]
+        monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: dialog_responses.pop(0))
+
+        window.switch_widget.upstream_btn.click()
+        assert window.switch_widget._current_mgmt_ip == "192.168.1.77"
+        assert window._current_walk_ip == "192.168.1.77"
+    finally:
+        window.close()
+        controller.close()
+
+
+def test_main_window_demo_arp_auto_resolve():
+    """Verify MainWindow in demo mode auto-resolves switches without mgmt IP to canned IP without network I/O."""
+    app = QApplication.instance() or QApplication([])
+    controller = AppController()
+    window = MainWindow(controller, demo=True)
+
+    try:
+        dev = NeighborDevice(
+            protocol="lldp",
+            source_interface="eth0",
+            system_name="USW-Lite-16-PoE",
+            chassis_id="74:83:c2:11:22:33",
+            management_ips=[],
+            port_id="Port 1",
+        )
+
+        window._on_device(dev)
+        assert window._arp_worker is not None
+        window._arp_worker.wait(5000)
+        QCoreApplication.processEvents()
+
+        assert window.switch_widget._current_mgmt_ip == "192.168.1.20"
+        assert "(auto-resolved via ARP)" in window.switch_widget.upstream_btn.toolTip()
     finally:
         window.close()
         controller.close()

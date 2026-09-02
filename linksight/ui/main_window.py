@@ -61,6 +61,31 @@ class UpstreamWorker(QThread):
             self.finished.emit(path)
 
 
+class ArpResolveWorker(QThread):
+    """Background worker thread for resolving switch management IP via ARP."""
+
+    finished = Signal(str)
+
+    def __init__(self, dev, is_demo: bool = False, resolver=None, parent=None):
+        super().__init__(parent)
+        self.dev = dev
+        self.is_demo = is_demo
+        self.resolver = resolver
+
+    def run(self) -> None:
+        if self.is_demo:
+            time.sleep(0.1)
+            self.finished.emit("192.168.1.20")
+            return
+
+        if self.resolver is not None:
+            resolved = self.resolver(self.dev)
+        else:
+            from ..discovery.arp_resolve import resolve_switch_mgmt_ip
+            resolved = resolve_switch_mgmt_ip(self.dev)
+        self.finished.emit(resolved or "")
+
+
 class MainWindow(QMainWindow):
     def __init__(self, controller: AppController, demo: bool = False):
         super().__init__()
@@ -69,6 +94,7 @@ class MainWindow(QMainWindow):
         self._session_community: str | None = None  # RAM-only process lifetime
         self._current_walk_ip: str = ""
         self._upstream_worker: UpstreamWorker | None = None
+        self._arp_worker: ArpResolveWorker | None = None
 
         self.setWindowTitle("LinkSight — LLDP/CDP Neighbor Discovery")
         self.setWindowIcon(self._app_icon())
@@ -289,6 +315,27 @@ class MainWindow(QMainWindow):
             f"Switch: {dev.system_name or dev.chassis_id}  ·  Port: "
             f"{(dev.raw_tlvs or {}).get('port_description') or dev.port_id or '?'}")
 
+        # If switch did not advertise a management IP, auto-resolve from chassis MAC via ARP
+        if not dev.management_ips and dev.chassis_id:
+            self._start_arp_resolve(dev)
+
+    def _start_arp_resolve(self, dev) -> None:
+        if (self._arp_worker and self._arp_worker.isRunning()
+                and getattr(self._arp_worker, "dev", None) == dev):
+            return
+
+        if self._arp_worker and self._arp_worker.isRunning():
+            self._arp_worker.terminate()
+            self._arp_worker.wait(500)
+
+        self._arp_worker = ArpResolveWorker(dev, is_demo=self.demo, parent=self)
+        self._arp_worker.finished.connect(self._on_arp_resolved)
+        self._arp_worker.start()
+
+    def _on_arp_resolved(self, resolved_ip: str) -> None:
+        if resolved_ip:
+            self.switch_widget.set_resolved_mgmt_ip(resolved_ip)
+
     def _on_dhcp(self, obs, raw=None) -> None:
         if raw is not None:
             self.feed_widget.add_frame(raw)
@@ -440,5 +487,8 @@ class MainWindow(QMainWindow):
         if self._upstream_worker and self._upstream_worker.isRunning():
             self._upstream_worker.terminate()
             self._upstream_worker.wait(1000)
+        if self._arp_worker and self._arp_worker.isRunning():
+            self._arp_worker.terminate()
+            self._arp_worker.wait(1000)
         self.controller.close()
         super().closeEvent(event)

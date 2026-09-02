@@ -40,6 +40,10 @@ SCENARIO: list[tuple[str, bytes]] = [
     ("eth0", build_cdp_frame(
         device_id="Cisco-IP-Phone-7942", port_id="Port 1", platform="Cisco IP Phone 7942",
         software="SCCP42.8-4-3S", mgmt_ip="10.0.0.50", vlan=100, caps=0x80)),
+    ("eth0", build_lldp_frame(
+        chassis_mac="74:83:c2:11:22:33", system_name="USW-Lite-16-PoE",
+        system_desc="UniFi Switch Lite 16 PoE, 6.5.59.14777", port_id="Port 1",
+        mgmt_ip="", vlan=1)),
     # DHCP transaction from a client on the wire (observed passively)
     ("eth0", build_dhcp_frame(
         message_type=MSG_DISCOVER, offered_ip="0.0.0.0", server_ip="0.0.0.0")),
