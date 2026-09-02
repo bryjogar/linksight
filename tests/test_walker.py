@@ -41,6 +41,7 @@ from linksight.discovery.walker import (
     OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS,
     OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS,
     OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS,
+    OID_LLDP_REM_CHASSIS_ID,
     OID_LLDP_REM_PORT_ID,
     OID_LLDP_REM_SYS_NAME,
     OID_LLDP_REM_MAN_ADDR_TABLE,
@@ -1141,11 +1142,16 @@ def test_walker_stp_root_with_lldp_candidate_mesh():
     assert hop.downlink_port.port_id == 3
     assert hop.downlink_port.neighbor_name == "Endpoint"
 
-    assert len(hop.ambiguous_candidates) == 1
+    assert len(hop.ambiguous_candidates) == 2
     cand = hop.ambiguous_candidates[0]
     assert cand.port_id == 24
     assert cand.neighbor_name == "Mesh-AP-Backhaul"
     assert cand.neighbor_ip == "10.0.0.1"
+    cand2 = hop.ambiguous_candidates[1]
+    assert cand2.port_id == 47
+    assert cand2.neighbor_name == "UniFi-Switch"
+    assert cand2.neighbor_ip == ""
+    assert cand2.neighbor_chassis == "74:83:c2:11:22:33"
 
 
 def test_walker_stp_root_mesh_forced_continuation():
@@ -1196,4 +1202,86 @@ def test_walker_stp_root_zero_candidates_clean_stop():
     assert len(result.hops) == 1
     assert result.hops[0].status == "root_reached"
     assert result.hops[0].ambiguous_candidates == []
+
+
+def test_walker_candidate_includes_lldp_neighbor_without_mgmt_ip():
+    """Verify that a UniFi-style LLDP neighbor on a port with sys_name and chassis MAC
+    but NO advertised management IP (no LLDP-MED/man-addr TLV) is included in candidate_uplinks.
+    """
+    sw_ip = "10.0.0.10"
+    mock_mib = {
+        OID_SYS_DESCR: "Aruba 2930F-24G-4SFP+ Switch (JL259A), WC.16.10.0016",
+        OID_SYS_NAME: "Aruba-2930F",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("000b86112233"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        # Port 1: Downlink to host
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.1": 1,
+        f"{OID_IF_NAME}.1": "Port 1",
+        f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+        f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+        # Port 47: UniFi switch without management IP
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.47": 47,
+        f"{OID_IF_NAME}.47": "Port 47",
+        f"{OID_IF_HIGH_SPEED}.47": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.47": 5,
+        f"{OID_DOT1Q_PVID}.47": 1,
+        f"{OID_LLDP_REM_SYS_NAME}.0.47.1": "USW-Lite-16-PoE",
+        f"{OID_LLDP_REM_PORT_ID}.0.47.1": "Port 1",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.47.1": bytes.fromhex("7483c2112233"),
+        # Note: no OID_LLDP_REM_MAN_ADDR_TABLE entry for port 47!
+    }
+    factory = make_mock_client_factory({sw_ip: mock_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    assert result.success is False
+    assert result.edge_type == "root_claimed_but_uplinks_present"
+    assert len(result.hops) == 1
+    hop = result.hops[0]
+    assert len(hop.ambiguous_candidates) == 1
+    cand = hop.ambiguous_candidates[0]
+    assert cand.port_id == 47
+    assert cand.port_name == "Port 47"
+    assert cand.neighbor_name == "USW-Lite-16-PoE"
+    assert cand.neighbor_ip == ""
+    assert cand.neighbor_chassis == "74:83:c2:11:22:33"
+
+
+def test_walker_single_no_ip_candidate_not_autofollowed_surfaces_actionable():
+    """Verify that when exactly one candidate exists and it has no IP (e.g. UniFi),
+    it is NOT auto-followed blindly, and instead surfaces as actionable/ambiguous.
+    """
+    sw_ip = "192.168.1.10"
+    mock_mib = {
+        OID_SYS_DESCR: "Access Switch",
+        OID_SYS_NAME: "SW-Edge",
+        # No STP MIB support (stp_present=False)
+        # Port 1: Downlink to host
+        f"{OID_IF_NAME}.1": "Port 1",
+        f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+        f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+        # Port 8: Single candidate upstream switch, no management IP advertised
+        f"{OID_IF_NAME}.8": "Port 8",
+        f"{OID_LLDP_REM_SYS_NAME}.0.8.1": "UniFi-Switch",
+        f"{OID_LLDP_REM_PORT_ID}.0.8.1": "Port 1",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.8.1": bytes.fromhex("7483c2112233"),
+    }
+    factory = make_mock_client_factory({sw_ip: mock_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    assert result.success is False
+    assert result.edge_type == "ambiguous"
+    assert len(result.hops) == 1
+    hop = result.hops[0]
+    assert hop.status == "ambiguous"
+    assert hop.uplink_port is None  # Not auto-followed into a dead walk
+    assert len(hop.ambiguous_candidates) == 1
+    cand = hop.ambiguous_candidates[0]
+    assert cand.port_id == 8
+    assert cand.neighbor_name == "UniFi-Switch"
+    assert cand.neighbor_ip == ""
+    assert cand.neighbor_chassis == "74:83:c2:11:22:33"
+    assert "upstream candidate neighbor found without management IP" in result.edge_summary
 

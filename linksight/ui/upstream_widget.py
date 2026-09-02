@@ -125,7 +125,7 @@ def _format_port_details_html(port: PortDiagnostics) -> str:
 class HopCardWidget(QFrame):
     """An expandable card displaying a single hop in the upstream chain."""
 
-    continue_from = Signal(str)
+    continue_from = Signal(object)
 
     def __init__(self, hop: Hop, parent=None):
         super().__init__(parent)
@@ -435,7 +435,10 @@ class HopCardWidget(QFrame):
         # Ambiguous candidate continuation buttons
         candidates = list(self.hop.ambiguous_candidates)
         if not candidates and self.hop.status in ("ambiguous", "root_claimed_but_uplinks_present"):
-            candidates = [p for p in self.hop.ports if p.neighbor_ip and not p.is_downlink]
+            candidates = [
+                p for p in self.hop.ports
+                if not p.is_downlink and (p.neighbor_name or p.neighbor_port or p.neighbor_chassis or p.neighbor_ip)
+            ]
 
         if self.hop.status in ("ambiguous", "root_claimed_but_uplinks_present") and candidates:
             cand_frame = QFrame()
@@ -450,6 +453,8 @@ class HopCardWidget(QFrame):
 
             if self.hop.status == "root_claimed_but_uplinks_present":
                 cand_title = QLabel("Switch reports STP root, but upstream mesh/LLDP candidate(s) detected — choose a path to continue:")
+            elif len(candidates) == 1:
+                cand_title = QLabel("Upstream candidate found without management IP — choose path to resolve and continue:")
             else:
                 cand_title = QLabel("Multiple upstream candidates found — choose a path to continue discovery:")
             cand_title.setStyleSheet(f"color: {WARN}; font-weight: 600; font-size: 11px;")
@@ -459,13 +464,18 @@ class HopCardWidget(QFrame):
             btn_row.setSpacing(8)
 
             for cand in candidates:
-                cand_name = cand.neighbor_name or "Neighbor"
+                cand_name = cand.neighbor_name or cand.neighbor_chassis or "Neighbor"
                 cand_ip = cand.neighbor_ip or ""
                 cand_port = cand.port_name or (f"Port {cand.port_id}" if cand.port_id is not None else "")
-                port_suffix = f" on {cand_port}" if cand_port else ""
-                btn_text = f"▶ Try {cand_name} ({cand_ip}){port_suffix}"
+                if cand_ip:
+                    port_suffix = f" on {cand_port}" if cand_port else ""
+                    btn_text = f"▶ Try {cand_name} ({cand_ip}){port_suffix}"
+                else:
+                    port_suffix = f" (on {cand_port})" if cand_port else ""
+                    btn_text = f"▶ Try {cand_name}{port_suffix}"
                 cand_btn = QPushButton(btn_text)
-                cand_btn.setObjectName(f"candidate_btn_{cand_ip}")
+                btn_id = cand_ip or str(cand.port_id)
+                cand_btn.setObjectName(f"candidate_btn_{btn_id}")
                 cand_btn.setStyleSheet(
                     f"QPushButton {{ background-color: {BG_PANEL}; border: 1px solid {BORDER_STRONG}; "
                     f"color: {ACCENT}; font-size: 11px; font-weight: 600; font-family: {MONO}; "
@@ -473,7 +483,7 @@ class HopCardWidget(QFrame):
                     f"QPushButton:hover {{ background-color: #1e3a5f; color: #ffffff; border-color: {ACCENT}; }}"
                 )
                 cand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                cand_btn.clicked.connect(lambda checked=False, target_ip=cand_ip: self.continue_from.emit(target_ip))
+                cand_btn.clicked.connect(lambda checked=False, c=cand: self.continue_from.emit(c.neighbor_ip if c.neighbor_ip else c))
                 btn_row.addWidget(cand_btn)
 
             btn_row.addStretch(1)
@@ -651,7 +661,7 @@ class UpstreamWidget(QWidget):
     """Panel displaying the full upstream discovery chain path and hop diagnostics."""
 
     refresh_requested = Signal()
-    continue_from = Signal(str)
+    continue_from = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)

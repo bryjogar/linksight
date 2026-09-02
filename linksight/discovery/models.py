@@ -26,6 +26,7 @@ class PortDiagnostics:
     neighbor_name: str = ""
     neighbor_ip: str = ""
     neighbor_port: str = ""
+    neighbor_chassis: str = ""
     is_uplink: bool = False
     is_downlink: bool = False
     oper_status: str = "unknown"  # "up", "down", "testing", "unknown", "dormant", "notPresent", "lowerLayerDown"

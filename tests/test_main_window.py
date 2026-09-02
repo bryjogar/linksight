@@ -211,3 +211,130 @@ def test_main_window_ambiguous_continue_wiring():
     finally:
         window.close()
         controller.close()
+
+
+def test_main_window_no_ip_candidate_arp_resolve_success(monkeypatch):
+    """Verify that clicking a candidate with no management IP triggers ARP resolution,
+    and when ARP succeeds, discovery continues with the resolved IP as forced_next_ip.
+    """
+    from linksight.discovery.models import PortDiagnostics
+    import linksight.ui.main_window as mw_mod
+
+    app = QApplication.instance() or QApplication([])
+    controller = AppController()
+    window = MainWindow(controller, demo=False)
+
+    cand = PortDiagnostics(
+        port_id=47,
+        port_name="Port 47",
+        neighbor_name="UniFi-Switch",
+        neighbor_ip="",
+        neighbor_chassis="74:83:c2:11:22:33",
+    )
+
+    resolved_calls = []
+
+    def mock_resolve(dev):
+        resolved_calls.append(dev)
+        return "192.168.1.88"
+
+    monkeypatch.setattr(mw_mod, "resolve_switch_mgmt_ip", mock_resolve)
+    requested_calls = []
+    monkeypatch.setattr(window, "_on_upstream_requested", lambda start_ip, forced_next_ip=None: requested_calls.append((start_ip, forced_next_ip)))
+
+    try:
+        window._current_walk_ip = "10.0.0.10"
+        window._on_upstream_continue(cand)
+
+        assert len(resolved_calls) == 1
+        assert resolved_calls[0].chassis_id == "74:83:c2:11:22:33"
+        assert resolved_calls[0].management_ips == []
+        assert len(requested_calls) == 1
+        assert requested_calls[0] == ("10.0.0.10", "192.168.1.88")
+    finally:
+        window.close()
+        controller.close()
+
+
+def test_main_window_no_ip_candidate_arp_fails_manual_prompt(monkeypatch):
+    """Verify that clicking a candidate with no management IP triggers ARP resolution,
+    and when ARP fails, falls back to manual QInputDialog entry and continues with entered IP.
+    """
+    from PySide6.QtWidgets import QInputDialog
+    from linksight.discovery.models import PortDiagnostics
+    import linksight.ui.main_window as mw_mod
+
+    app = QApplication.instance() or QApplication([])
+    controller = AppController()
+    window = MainWindow(controller, demo=False)
+
+    cand = PortDiagnostics(
+        port_id=47,
+        port_name="Port 47",
+        neighbor_name="UniFi-Switch",
+        neighbor_ip="",
+        neighbor_chassis="74:83:c2:11:22:33",
+    )
+
+    # ARP resolve returns None
+    monkeypatch.setattr(mw_mod, "resolve_switch_mgmt_ip", lambda dev: None)
+
+    # Mock QInputDialog.getText to return a user-entered IP
+    prompt_shown = []
+
+    def mock_get_text(parent, title, label, echo=None):
+        prompt_shown.append((title, label))
+        return "192.168.1.99", True
+
+    monkeypatch.setattr(QInputDialog, "getText", mock_get_text)
+
+    requested_calls = []
+    monkeypatch.setattr(window, "_on_upstream_requested", lambda start_ip, forced_next_ip=None: requested_calls.append((start_ip, forced_next_ip)))
+
+    try:
+        window._current_walk_ip = "10.0.0.10"
+        window._on_upstream_continue(cand)
+
+        assert len(prompt_shown) == 1
+        assert "UniFi-Switch" in prompt_shown[0][1]
+        assert len(requested_calls) == 1
+        assert requested_calls[0] == ("10.0.0.10", "192.168.1.99")
+    finally:
+        window.close()
+        controller.close()
+
+
+def test_main_window_no_ip_candidate_demo_mode():
+    """Verify that in demo mode, clicking a candidate with no IP uses canned resolution
+    (192.168.1.20) and continues the walk offscreen.
+    """
+    from linksight.discovery.models import PortDiagnostics
+
+    app = QApplication.instance() or QApplication([])
+    controller = AppController()
+    window = MainWindow(controller, demo=True)
+
+    cand = PortDiagnostics(
+        port_id=47,
+        port_name="Port 47",
+        neighbor_name="UniFi-Switch",
+        neighbor_ip="",
+        neighbor_chassis="74:83:c2:11:22:33",
+    )
+
+    try:
+        window._current_walk_ip = "10.0.0.10"
+        window._on_upstream_continue(cand)
+
+        assert window._upstream_worker is not None
+        assert window._upstream_worker.forced_next_ip == "192.168.1.20"
+        window._upstream_worker.wait(3000)
+        QCoreApplication.processEvents()
+
+        assert len(window.controller.upstream_path.hops) == 3
+        assert window.controller.upstream_path.hops[0].uplink_port.neighbor_ip == "192.168.1.20"
+        assert window.controller.upstream_path.hops[1].hostname == "UniFi-Switch"
+        assert window.controller.upstream_path.hops[2].hostname == "Eero-Mesh"
+    finally:
+        window.close()
+        controller.close()

@@ -880,14 +880,77 @@ def test_upstream_widget_render_aruba_mesh_candidate():
     cand_labels = [lbl.text() for lbl in cand_frame.findChildren(QLabel)]
     assert any("Switch reports STP root, but upstream mesh/LLDP candidate(s) detected" in t for t in cand_labels)
 
-    # Verify candidate button
+    # Verify candidate button for mesh AP
     cand_btn = aruba_card.findChild(QPushButton, "candidate_btn_10.0.0.1")
     assert cand_btn is not None
     assert "▶ Try Mesh-AP-Backhaul (10.0.0.1) on Port 24" in cand_btn.text()
 
+    # Verify candidate button for UniFi switch on Port 47
+    cand_btn_47 = aruba_card.findChild(QPushButton, "candidate_btn_47")
+    assert cand_btn_47 is not None
+    assert "▶ Try UniFi-Switch (on Port 47)" in cand_btn_47.text()
+
     # Clicking button emits signal
     cand_btn.click()
     assert emitted == ["10.0.0.1"]
+
+    widget.close()
+
+
+def test_candidate_button_renders_no_ip_label_format():
+    """Verify that HopCardWidget renders candidates without management IP properly,
+    including Port 47 with name, or Port with chassis MAC, and clicking emits candidate.
+    """
+    from PySide6.QtWidgets import QPushButton
+    from linksight.discovery.models import Hop, PortDiagnostics, UpstreamPath
+
+    app = QApplication.instance() or QApplication([])
+
+    cand_unifi = PortDiagnostics(
+        port_id=47,
+        port_name="Port 47",
+        neighbor_name="UniFi-Switch",
+        neighbor_ip="",
+        neighbor_chassis="74:83:c2:11:22:33",
+        link_speed_mbps=1000,
+    )
+    cand_chassis_only = PortDiagnostics(
+        port_id=12,
+        port_name="Port 12",
+        neighbor_name="",
+        neighbor_ip="",
+        neighbor_chassis="00:11:22:33:44:55",
+        link_speed_mbps=1000,
+    )
+
+    hop = Hop(
+        hop_index=1,
+        hostname="Aruba-2930F",
+        mgmt_ip="10.0.0.10",
+        status="root_claimed_but_uplinks_present",
+        ports=[cand_unifi, cand_chassis_only],
+        ambiguous_candidates=[cand_unifi, cand_chassis_only],
+    )
+
+    widget = UpstreamWidget()
+    widget.show()
+    widget.show_path(UpstreamPath(start_ip="10.0.0.10", hops=[hop], edge_type="root_claimed_but_uplinks_present", success=False))
+
+    emitted = []
+    widget.continue_from.connect(emitted.append)
+
+    cand_btns = [b for b in widget.findChildren(QPushButton) if "▶ Try" in b.text()]
+    assert len(cand_btns) == 2
+    assert "▶ Try UniFi-Switch (on Port 47)" in cand_btns[0].text()
+    assert "▶ Try 00:11:22:33:44:55 (on Port 12)" in cand_btns[1].text()
+
+    # Clicking candidate without IP emits the candidate PortDiagnostics object
+    cand_btns[0].click()
+    assert len(emitted) == 1
+    assert isinstance(emitted[0], PortDiagnostics)
+    assert emitted[0].port_id == 47
+    assert emitted[0].neighbor_name == "UniFi-Switch"
+    assert emitted[0].neighbor_chassis == "74:83:c2:11:22:33"
 
     widget.close()
 

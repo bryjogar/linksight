@@ -50,6 +50,7 @@ OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS = "1.3.6.1.2.1.17.7.1.4.3.1.3"
 OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS = "1.3.6.1.2.1.17.7.1.4.2.1.5"
 
 # LLDP-MIB (IEEE 802.1AB)
+OID_LLDP_REM_CHASSIS_ID = "1.0.8802.1.1.2.1.4.1.1.5"
 OID_LLDP_REM_PORT_ID = "1.0.8802.1.1.2.1.4.1.1.7"
 OID_LLDP_REM_PORT_DESC = "1.0.8802.1.1.2.1.4.1.1.8"
 OID_LLDP_REM_SYS_NAME = "1.0.8802.1.1.2.1.4.1.1.9"
@@ -693,6 +694,17 @@ class UpstreamWalker:
                 except Exception:
                     pass
 
+                try:
+                    for oid, val in client.walk(OID_LLDP_REM_CHASSIS_ID):
+                        parts = oid.strip(".").split(".")
+                        if len(parts) >= 2 and parts[-2].isdigit():
+                            p_num = int(parts[-2])
+                            c_mac = _format_mac(val)
+                            if c_mac:
+                                port_neighbors.setdefault(p_num, {})["chassis"] = c_mac
+                except Exception:
+                    pass
+
                 # LLDP Management Address table: OID contains IP or value contains IP
                 try:
                     for oid, val in client.walk(OID_LLDP_REM_MAN_ADDR_TABLE):
@@ -791,6 +803,7 @@ class UpstreamWalker:
                         neighbor_name=p_neigh.get("name", ""),
                         neighbor_ip=p_neigh.get("ip", ""),
                         neighbor_port=p_neigh.get("port", ""),
+                        neighbor_chassis=p_neigh.get("chassis", ""),
                         is_uplink=is_this_root_port,
                     )
                     ports_list.append(diag)
@@ -939,11 +952,11 @@ class UpstreamWalker:
                         )
 
                     for p in ports_list:
-                        if not p.neighbor_ip:
+                        if not (p.neighbor_name or p.neighbor_port or p.neighbor_chassis or p.neighbor_ip):
                             continue
                         if p is downlink_port_diag or p.is_downlink:
                             continue
-                        if prev_hop_ip and p.neighbor_ip == prev_hop_ip:
+                        if prev_hop_ip and p.neighbor_ip and p.neighbor_ip == prev_hop_ip:
                             continue
                         if prev_hop_name and p.neighbor_name:
                             p_n = p.neighbor_name.strip().lower()
@@ -951,7 +964,7 @@ class UpstreamWalker:
                             if p_n == h_n or h_n in p_n or p_n in h_n:
                                 continue
                         if hop_index == 1:
-                            if endpoint_ip and p.neighbor_ip == endpoint_ip:
+                            if endpoint_ip and p.neighbor_ip and p.neighbor_ip == endpoint_ip:
                                 continue
                             if p.neighbor_name and any(
                                 k in p.neighbor_name.lower()
@@ -971,11 +984,37 @@ class UpstreamWalker:
                                 if p.neighbor_ip == forced_next_ip:
                                     forced_port = p
                                     break
+                        if forced_port is None:
+                            try:
+                                for oid, val in client.walk(OID_IP_NET_TO_MEDIA_TABLE):
+                                    parts = oid.strip(".").split(".")
+                                    if len(parts) >= 6 and ".".join(parts[-4:]) == forced_next_ip:
+                                        mac_val = _format_mac(val)
+                                        if mac_val:
+                                            from .arp_resolve import normalize_mac
+                                            n_mac = normalize_mac(mac_val)
+                                            for p in candidate_uplinks:
+                                                if normalize_mac(p.neighbor_chassis) == n_mac:
+                                                    forced_port = p
+                                                    break
+                                        if forced_port:
+                                            break
+                            except Exception:
+                                pass
+                        if forced_port is None:
+                            no_ip_cands = [p for p in candidate_uplinks if not p.neighbor_ip]
+                            if len(no_ip_cands) == 1:
+                                forced_port = no_ip_cands[0]
+                            elif len(candidate_uplinks) == 1:
+                                forced_port = candidate_uplinks[0]
+
                         if forced_port is not None:
+                            if not forced_port.neighbor_ip:
+                                forced_port.neighbor_ip = forced_next_ip
                             uplink_port_diag = forced_port
                             uplink_port_diag.is_uplink = True
                             forced_next_ip = None  # consumed
-                    elif not is_root and len(candidate_uplinks) == 1:
+                    elif not is_root and len(candidate_uplinks) == 1 and candidate_uplinks[0].neighbor_ip:
                         uplink_port_diag = candidate_uplinks[0]
                         uplink_port_diag.is_uplink = True
                 elif forced_next_ip:
@@ -985,6 +1024,8 @@ class UpstreamWalker:
                             forced_port = p
                             break
                     if forced_port is not None:
+                        if not forced_port.neighbor_ip:
+                            forced_port.neighbor_ip = forced_next_ip
                         uplink_port_diag = forced_port
                         uplink_port_diag.is_uplink = True
                         forced_next_ip = None
@@ -1008,7 +1049,7 @@ class UpstreamWalker:
                 elif not stp_present:
                     if not candidate_uplinks and uplink_port_diag is None:
                         hop_status = "no_upstream"
-                    elif len(candidate_uplinks) > 1 and uplink_port_diag is None:
+                    elif candidate_uplinks and uplink_port_diag is None:
                         hop_status = "ambiguous"
 
                 hop = Hop(
@@ -1026,7 +1067,13 @@ class UpstreamWalker:
                     ports=ports_list,
                     uplink_port=uplink_port_diag,
                     downlink_port=downlink_port_diag,
-                    ambiguous_candidates=list(candidate_uplinks) if (len(candidate_uplinks) > 1 or hop_status in ("ambiguous", "root_claimed_but_uplinks_present")) else [],
+                    ambiguous_candidates=list(candidate_uplinks) if (
+                        candidate_uplinks and (
+                            uplink_port_diag is None
+                            or len(candidate_uplinks) > 1
+                            or hop_status in ("ambiguous", "root_claimed_but_uplinks_present")
+                        )
+                    ) else [],
                     response_time_ms=(time.perf_counter() - t0) * 1000,
                 )
                 hops.append(hop)
@@ -1061,18 +1108,26 @@ class UpstreamWalker:
                             f"via LLDP — this switch appears to be the network edge."
                         )
                         break
-                    elif len(candidate_uplinks) > 1 and uplink_port_diag is None:
+                    elif candidate_uplinks and uplink_port_diag is None:
                         edge_type = "ambiguous"
                         cand_list = [
-                            f"{p.neighbor_name} ({p.neighbor_ip})" if p.neighbor_name else str(p.neighbor_ip)
+                            f"{p.neighbor_name} ({p.neighbor_ip})" if (p.neighbor_name and p.neighbor_ip)
+                            else (p.neighbor_name or (f"MAC {p.neighbor_chassis}" if p.neighbor_chassis else f"Port {p.port_id}"))
                             for p in candidate_uplinks
                         ]
                         cand_desc = ", ".join(cand_list)
-                        edge_summary = (
-                            f"Walk stopped at hop {hop_index} ({sys_name or curr_ip}): "
-                            f"multiple upstream LLDP candidate neighbors found ({cand_desc}) — "
-                            f"verify upstream topology."
-                        )
+                        if len(candidate_uplinks) == 1:
+                            edge_summary = (
+                                f"Walk stopped at hop {hop_index} ({sys_name or curr_ip}): "
+                                f"upstream candidate neighbor found without management IP ({cand_desc}) — "
+                                f"choose path to resolve."
+                            )
+                        else:
+                            edge_summary = (
+                                f"Walk stopped at hop {hop_index} ({sys_name or curr_ip}): "
+                                f"multiple upstream LLDP candidate neighbors found ({cand_desc}) — "
+                                f"verify upstream topology."
+                            )
                         break
 
                 # If switch is NOT root: look up neighbor on the root port ONLY

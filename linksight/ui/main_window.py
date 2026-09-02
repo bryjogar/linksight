@@ -24,6 +24,9 @@ from .settings_widget import SettingsWidget
 from ..capture.interfaces import list_interfaces, preferred_interface, NetInterface
 from ..capture.sniffer import Sniffer
 from ..capture.demo import DemoSource
+from ..discovery.models import PortDiagnostics
+from ..discovery.arp_resolve import resolve_switch_mgmt_ip
+from ..parse.model import NeighborDevice
 from .interface_watcher import InterfaceWatcher
 from .ssh_terminal import launch_ssh_terminal
 from .update_event import UpdateAvailableEvent
@@ -635,10 +638,71 @@ class MainWindow(QMainWindow):
         self._upstream_worker.cancelled.connect(self._on_discovery_cancelled)
         self._upstream_worker.start()
 
-    def _on_upstream_continue(self, neighbor_ip: str) -> None:
+    def _on_upstream_continue(self, target: str | PortDiagnostics) -> None:
         start_ip = self._current_walk_ip or self.switch_widget._current_mgmt_ip
-        if start_ip:
+        if not start_ip:
+            return
+
+        candidate: PortDiagnostics | None = None
+        neighbor_ip: str = ""
+        if isinstance(target, PortDiagnostics):
+            candidate = target
+            neighbor_ip = candidate.neighbor_ip or ""
+        elif isinstance(target, str):
+            neighbor_ip = target
+
+        # If candidate has an IP, continue as today
+        if neighbor_ip:
             self._on_upstream_requested(start_ip, forced_next_ip=neighbor_ip)
+            return
+
+        # Candidate has NO IP: resolve management IP before walking
+        chassis = candidate.neighbor_chassis if candidate else ""
+        cand_name = (candidate.neighbor_name if candidate else "") or chassis or "neighbor switch"
+
+        resolved_ip: str | None = None
+        if self.demo:
+            # Demo mode canned resolution for UniFi candidate
+            resolved_ip = "192.168.1.20"
+        elif chassis:
+            active_iface = self.iface_combo.currentData() if hasattr(self, "iface_combo") else ""
+            dev = NeighborDevice(
+                protocol="lldp",
+                source_interface=active_iface or "",
+                chassis_id=chassis,
+                system_name=candidate.neighbor_name if candidate else "",
+                management_ips=[],
+            )
+            try:
+                resolved_ip = resolve_switch_mgmt_ip(dev)
+            except Exception:
+                resolved_ip = None
+
+        if resolved_ip:
+            self._on_upstream_requested(start_ip, forced_next_ip=resolved_ip)
+            return
+
+        # ARP resolution failed or no chassis MAC: manual IP entry prompt fallback
+        prompt_label = (
+            f"Switch Management IPv4 Address for {cand_name}:\n"
+            "(Switch did not advertise a management IP via LLDP/CDP and ARP resolution did not find it)"
+        )
+        while True:
+            ip_in, ok = QInputDialog.getText(
+                self,
+                "LinkSight — Upstream Discovery",
+                prompt_label,
+                QLineEdit.EchoMode.Normal,
+            )
+            if not ok or not ip_in.strip():
+                return
+            candidate_ip = ip_in.strip()
+            try:
+                ipaddress.IPv4Address(candidate_ip)
+                self._on_upstream_requested(start_ip, forced_next_ip=candidate_ip)
+                break
+            except ValueError:
+                prompt_label = "Invalid IPv4 address. Please enter a valid switch management IPv4:"
 
     def _on_discovery_cancelled(self) -> None:
         self._upstream_worker = None
