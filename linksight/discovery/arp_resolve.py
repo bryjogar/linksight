@@ -108,6 +108,7 @@ def arp_sweep(
     subnets: list[str] | None = None,
     timeout: float = 2.0,
     transport: Callable | None = None,
+    stop_check: Callable[[], bool] | None = None,
 ) -> dict[str, str]:
     """Perform a best-effort ARP sweep on the local subnet(s) of iface_name.
 
@@ -118,6 +119,9 @@ def arp_sweep(
     the capture engine already has; if sendp/srp fails, return {} and fall through
     to manual.
     """
+    if stop_check is not None and stop_check():
+        return {}
+
     if subnets is None:
         target_nic = None
         for nic in list_interfaces():
@@ -129,17 +133,21 @@ def arp_sweep(
         else:
             subnets = []
 
-    if not subnets:
+    if not subnets or (stop_check is not None and stop_check()):
         return {}
 
     results: dict[str, str] = {}
 
     for subnet_str in subnets:
+        if stop_check is not None and stop_check():
+            return {}
         try:
             if transport is not None:
                 res = transport(iface_name, subnet_str, timeout)
                 if isinstance(res, dict):
                     for k, v in res.items():
+                        if stop_check is not None and stop_check():
+                            return {}
                         norm = normalize_mac(k)
                         if norm:
                             results[norm] = str(v)
@@ -151,6 +159,8 @@ def arp_sweep(
                 ans, _ = srp(pkt, iface=iface_name, timeout=timeout, verbose=0, retry=0)
 
             for pair in ans:
+                if stop_check is not None and stop_check():
+                    return {}
                 rcv = pair[1] if isinstance(pair, (tuple, list)) and len(pair) >= 2 else pair
                 if hasattr(rcv, "haslayer"):
                     from scapy.all import ARP as ScapyARP
@@ -180,6 +190,7 @@ def resolve_switch_mgmt_ip(
     sweep_fn: Callable[..., dict[str, str]] | None = None,
     ifaces: list[NetInterface] | None = None,
     timeout: float = 2.0,
+    stop_check: Callable[[], bool] | None = None,
 ) -> str | None:
     """Orchestrate switch management IP resolution from chassis MAC.
 
@@ -190,6 +201,9 @@ def resolve_switch_mgmt_ip(
     5. Sweep subnets using sweep_fn (defaults to arp_sweep).
     6. Return IP matching switch's chassis MAC, or None.
     """
+    if stop_check is not None and stop_check():
+        return None
+
     # 1. Device already has an LLDP/CDP management IP — no sweep attempted
     if dev.management_ips:
         return None
@@ -217,19 +231,25 @@ def resolve_switch_mgmt_ip(
 
     # 4. Compute subnets for interface
     subnets = compute_subnets_for_interface(nic)
-    if not subnets:
+    if not subnets or (stop_check is not None and stop_check()):
         return None
 
     # 5. Sweep subnets
     fn = sweep_fn or arp_sweep
     try:
-        replies = fn(nic.name, subnets=[str(s) for s in subnets], timeout=timeout)
+        replies = fn(nic.name, subnets=[str(s) for s in subnets], timeout=timeout, stop_check=stop_check)
     except TypeError:
         try:
-            replies = fn(nic.name, timeout=timeout)
+            replies = fn(nic.name, subnets=[str(s) for s in subnets], timeout=timeout)
         except TypeError:
-            replies = fn(nic.name)
+            try:
+                replies = fn(nic.name, timeout=timeout)
+            except TypeError:
+                replies = fn(nic.name)
     except Exception:
+        return None
+
+    if stop_check is not None and stop_check():
         return None
 
     if not isinstance(replies, dict):
@@ -237,6 +257,8 @@ def resolve_switch_mgmt_ip(
 
     # 6. Match normalized switch chassis MAC
     for mac_key, ip_val in replies.items():
+        if stop_check is not None and stop_check():
+            return None
         if normalize_mac(mac_key) == target_mac:
             return str(ip_val)
 

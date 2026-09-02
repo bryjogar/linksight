@@ -72,6 +72,7 @@ class Hop:
     isp_gateway: str | None = None
     wan_interface: PortDiagnostics | None = None
     lan_interface: PortDiagnostics | None = None
+    ambiguous_candidates: list[PortDiagnostics] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)

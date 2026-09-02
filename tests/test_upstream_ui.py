@@ -66,6 +66,13 @@ def test_upstream_widget_render_demo_path():
     hop1_labels_text = " ".join(lbl.text() for lbl in hop1_summary.findChildren(QLabel))
     assert "Gi1/0/1" in hop1_labels_text
     assert "Gi1/0/24" in hop1_labels_text
+    # Item 3: Current-port VLAN/STP/speed details outside the collapsed table
+    assert "PVID 200" in hop1_labels_text
+    assert "VLANs 200" in hop1_labels_text
+    assert "STP forwarding" in hop1_labels_text
+    assert "1 Gbps" in hop1_labels_text
+    assert "PVID 100" in hop1_labels_text
+    assert "VLANs 100, 200, 300" in hop1_labels_text
     # Table collapsed by default
     assert hop1_card.table is not None
     assert hop1_card.table.isHidden() is True
@@ -621,6 +628,82 @@ def test_upstream_widget_render_unifi_demo_paths():
     assert len(path_no_up.hops) == 1
     lbls_no_up = [lbl.text() for lbl in widget.findChildren(QLabel)]
     assert any("NETWORK EDGE" in t for t in lbls_no_up)
+
+    # Variant: ambiguous (1 hop with Aruba and AP candidate buttons)
+    path_ambig = get_unifi_demo_path("ambiguous")
+    widget.show_path(path_ambig)
+    assert "multiple upstream LLDP candidate neighbors" in widget.summary_label.text()
+    assert len(path_ambig.hops) == 1
+    lbls_ambig = [lbl.text() for lbl in widget.findChildren(QLabel)]
+    assert any("AMBIGUOUS UPLINK" in t for t in lbls_ambig)
+
+    # Verify candidate buttons appear in the UI
+    from PySide6.QtWidgets import QPushButton
+    btns = widget.findChildren(QPushButton)
+    btn_texts = [b.text() for b in btns]
+    assert any("Aruba-2930F" in t and "10.0.0.10" in t for t in btn_texts)
+    assert any("U6-Pro-AP" in t and "192.168.1.50" in t for t in btn_texts)
+
+    widget.close()
+
+
+def test_hop_card_widget_ambiguous_candidate_buttons():
+    """Verify HopCardWidget renders candidate buttons on ambiguous hop and clicking emits continue_from."""
+    from PySide6.QtWidgets import QPushButton
+    from linksight.discovery.models import Hop, PortDiagnostics, UpstreamPath
+
+    app = QApplication.instance() or QApplication([])
+
+    cand1 = PortDiagnostics(
+        port_id=15,
+        port_name="Port 15",
+        neighbor_name="Aruba-2930F",
+        neighbor_ip="10.0.0.10",
+        link_speed_mbps=1000,
+    )
+    cand2 = PortDiagnostics(
+        port_id=16,
+        port_name="Port 16",
+        neighbor_name="U6-Pro-AP",
+        neighbor_ip="192.168.1.50",
+        link_speed_mbps=1000,
+    )
+    down_port = PortDiagnostics(
+        port_id=1,
+        port_name="Port 1",
+        is_downlink=True,
+        neighbor_name="Host-PC",
+    )
+
+    hop = Hop(
+        hop_index=1,
+        hostname="USW-Lite-16",
+        mgmt_ip="192.168.1.20",
+        status="ambiguous",
+        ports=[down_port, cand1, cand2],
+        downlink_port=down_port,
+        ambiguous_candidates=[cand1, cand2],
+    )
+
+    widget = UpstreamWidget()
+    widget.show()
+    widget.show_path(UpstreamPath(start_ip="192.168.1.20", hops=[hop], edge_type="ambiguous", success=False))
+
+    emitted: list[str] = []
+    widget.continue_from.connect(emitted.append)
+
+    cand_btns = [b for b in widget.findChildren(QPushButton) if "▶ Try" in b.text()]
+    assert len(cand_btns) == 2
+    assert "▶ Try Aruba-2930F (10.0.0.10) on Port 15" in cand_btns[0].text()
+    assert "▶ Try U6-Pro-AP (192.168.1.50) on Port 16" in cand_btns[1].text()
+
+    # Click candidate 1 -> emits 10.0.0.10
+    cand_btns[0].click()
+    assert emitted == ["10.0.0.10"]
+
+    # Click candidate 2 -> emits 192.168.1.50
+    cand_btns[1].click()
+    assert emitted == ["10.0.0.10", "192.168.1.50"]
 
     widget.close()
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import sys
+import threading
 import time
 
 from PySide6.QtCore import Qt, QSize, QEvent, QTimer, QThread, Signal
@@ -33,32 +34,68 @@ class UpstreamWorker(QThread):
 
     progress = Signal(str)
     finished = Signal(object)
+    cancelled = Signal()
 
-    def __init__(self, start_ip: str, community: str, is_demo: bool = False, parent=None):
+    def __init__(self, start_ip: str, community: str, is_demo: bool = False, parent=None, forced_next_ip: str | None = None):
         super().__init__(parent)
         self.start_ip = start_ip
         # RAM-only community: kept strictly in memory for this worker
         self.community = community
         self.is_demo = is_demo
+        self.forced_next_ip = forced_next_ip
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._stop_event.is_set()
 
     def run(self) -> None:
         if self.is_demo:
             from ..discovery.demo import get_demo_path
-            self.progress.emit(f"Querying hop 1: {self.start_ip} (Access-SW2)…")
-            time.sleep(0.3)
+            if self.forced_next_ip:
+                self.progress.emit(f"Continuing discovery from {self.start_ip} via {self.forced_next_ip}…")
+            else:
+                self.progress.emit(f"Querying hop 1: {self.start_ip} (Access-SW2)…")
+            for _ in range(30):
+                if self._stop_event.is_set():
+                    self.cancelled.emit()
+                    return
+                time.sleep(0.01)
             self.progress.emit("Querying hop 2: 10.0.0.2 (Core-SW1)…")
-            time.sleep(0.3)
+            for _ in range(30):
+                if self._stop_event.is_set():
+                    self.cancelled.emit()
+                    return
+                time.sleep(0.01)
             self.progress.emit("STP Root reached. Querying edge firewall…")
-            time.sleep(0.2)
-            path = get_demo_path(self.start_ip)
+            for _ in range(20):
+                if self._stop_event.is_set():
+                    self.cancelled.emit()
+                    return
+                time.sleep(0.01)
+            if self._stop_event.is_set():
+                self.cancelled.emit()
+                return
+            path = get_demo_path(self.start_ip, forced_next_ip=self.forced_next_ip)
             self.finished.emit(path)
         else:
+            if self._stop_event.is_set():
+                self.cancelled.emit()
+                return
             from ..discovery.walker import UpstreamWalker
             walker = UpstreamWalker(community=self.community)
             path = walker.walk(
                 self.start_ip,
                 progress_callback=lambda msg: self.progress.emit(msg),
+                stop_check=self._stop_event.is_set,
+                forced_next_ip=self.forced_next_ip,
             )
+            if self._stop_event.is_set():
+                self.cancelled.emit()
+                return
             self.finished.emit(path)
 
 
@@ -66,24 +103,55 @@ class ArpResolveWorker(QThread):
     """Background worker thread for resolving switch management IP via ARP."""
 
     finished = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, dev, is_demo: bool = False, resolver=None, parent=None):
         super().__init__(parent)
         self.dev = dev
         self.is_demo = is_demo
         self.resolver = resolver
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._stop_event.is_set()
 
     def run(self) -> None:
         if self.is_demo:
-            time.sleep(0.1)
+            for _ in range(10):
+                if self._stop_event.is_set():
+                    self.cancelled.emit()
+                    return
+                time.sleep(0.01)
+            if self._stop_event.is_set():
+                self.cancelled.emit()
+                return
             self.finished.emit("192.168.1.20")
             return
 
+        if self._stop_event.is_set():
+            self.cancelled.emit()
+            return
+
         if self.resolver is not None:
-            resolved = self.resolver(self.dev)
+            try:
+                resolved = self.resolver(self.dev, stop_check=self._stop_event.is_set)
+            except TypeError:
+                resolved = self.resolver(self.dev)
         else:
             from ..discovery.arp_resolve import resolve_switch_mgmt_ip
-            resolved = resolve_switch_mgmt_ip(self.dev)
+            try:
+                resolved = resolve_switch_mgmt_ip(self.dev, stop_check=self._stop_event.is_set)
+            except TypeError:
+                resolved = resolve_switch_mgmt_ip(self.dev)
+
+        if self._stop_event.is_set():
+            self.cancelled.emit()
+            return
+
         self.finished.emit(resolved or "")
 
 
@@ -97,6 +165,7 @@ class MainWindow(QMainWindow):
         self._current_walk_ip: str = ""
         self._upstream_worker: UpstreamWorker | None = None
         self._arp_worker: ArpResolveWorker | None = None
+        self._pending_arp_dev = None
         self._last_capture_error_time: float = 0.0
 
         self.setWindowTitle("LinkSight — LLDP/CDP Neighbor Discovery")
@@ -116,6 +185,7 @@ class MainWindow(QMainWindow):
         self.switch_widget.ssh_requested.connect(self._on_ssh_requested)
         self.switch_widget.upstream_requested.connect(self._on_upstream_requested)
         self.upstream_widget.refresh_requested.connect(self._on_upstream_refresh)
+        self.upstream_widget.continue_from.connect(self._on_upstream_continue)
 
         # seed LAN info with the preferred interface
         preferred = self.iface_combo.currentData()
@@ -407,16 +477,31 @@ class MainWindow(QMainWindow):
             return
 
         if self._arp_worker and self._arp_worker.isRunning():
-            self._arp_worker.terminate()
-            self._arp_worker.wait(500)
+            self._pending_arp_dev = dev
+            self._arp_worker.stop()
+            return
 
+        self._pending_arp_dev = None
         self._arp_worker = ArpResolveWorker(dev, is_demo=self.demo, parent=self)
         self._arp_worker.finished.connect(self._on_arp_resolved)
+        self._arp_worker.cancelled.connect(self._on_arp_cancelled)
         self._arp_worker.start()
 
     def _on_arp_resolved(self, resolved_ip: str) -> None:
-        if resolved_ip:
+        self._arp_worker = None
+        if resolved_ip and self._pending_arp_dev is None:
             self.switch_widget.set_resolved_mgmt_ip(resolved_ip)
+        self._check_pending_arp()
+
+    def _on_arp_cancelled(self) -> None:
+        self._arp_worker = None
+        self._check_pending_arp()
+
+    def _check_pending_arp(self) -> None:
+        if self._pending_arp_dev is not None:
+            pending = self._pending_arp_dev
+            self._pending_arp_dev = None
+            self._start_arp_resolve(pending)
 
     def _on_dhcp(self, obs, raw=None) -> None:
         if raw is not None:
@@ -442,7 +527,7 @@ class MainWindow(QMainWindow):
         if not ok_launch:
             QMessageBox.warning(self, "LinkSight — SSH", msg)
 
-    def _on_upstream_requested(self, start_ip: str) -> None:
+    def _on_upstream_requested(self, start_ip: str, forced_next_ip: str | None = None) -> None:
         """Trigger an upstream discovery walk starting from start_ip."""
         if not start_ip:
             start_ip = self.switch_widget._current_mgmt_ip
@@ -493,13 +578,31 @@ class MainWindow(QMainWindow):
             community = self._session_community
 
         self._current_walk_ip = start_ip
-        self.upstream_widget.set_status(f"Starting discovery from {start_ip}…")
+        if forced_next_ip:
+            self.upstream_widget.set_status(f"Continuing discovery from {start_ip} via {forced_next_ip}…")
+        else:
+            self.upstream_widget.set_status(f"Starting discovery from {start_ip}…")
         self.controller.on_upstream_started(start_ip)
 
-        self._upstream_worker = UpstreamWorker(start_ip, community, is_demo=self.demo, parent=self)
+        if self._upstream_worker and self._upstream_worker.isRunning():
+            self._upstream_worker.stop()
+            self._upstream_worker.wait(1000)
+
+        self._upstream_worker = UpstreamWorker(
+            start_ip, community, is_demo=self.demo, parent=self, forced_next_ip=forced_next_ip
+        )
         self._upstream_worker.progress.connect(self._on_discovery_progress)
         self._upstream_worker.finished.connect(self._on_discovery_finished)
+        self._upstream_worker.cancelled.connect(self._on_discovery_cancelled)
         self._upstream_worker.start()
+
+    def _on_upstream_continue(self, neighbor_ip: str) -> None:
+        start_ip = self._current_walk_ip or self.switch_widget._current_mgmt_ip
+        if start_ip:
+            self._on_upstream_requested(start_ip, forced_next_ip=neighbor_ip)
+
+    def _on_discovery_cancelled(self) -> None:
+        self._upstream_worker = None
 
     def _on_upstream_refresh(self) -> None:
         ip = self._current_walk_ip or self.switch_widget._current_mgmt_ip
@@ -578,10 +681,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_watcher") and self._watcher is not None:
             self._watcher.stop()
         if self._upstream_worker and self._upstream_worker.isRunning():
-            self._upstream_worker.terminate()
-            self._upstream_worker.wait(1000)
+            self._upstream_worker.stop()
+            self._upstream_worker.wait(2000)
         if self._arp_worker and self._arp_worker.isRunning():
-            self._arp_worker.terminate()
-            self._arp_worker.wait(1000)
+            self._arp_worker.stop()
+            self._arp_worker.wait(2000)
         self.controller.close()
         super().closeEvent(event)

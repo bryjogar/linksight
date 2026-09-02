@@ -766,6 +766,64 @@ def test_walker_stp_absent_multiple_lldp_neighbors_ambiguous():
     assert "10.0.0.20" in result.edge_summary
 
 
+def test_walker_forced_next_ip_continues_ambiguous_stop():
+    """Verify that forced_next_ip overrides an ambiguous stop and continues upstream to chosen candidate."""
+    unifi_ip = "192.168.1.20"
+
+    unifi_mib = {
+        OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        OID_SYS_NAME: "USW-Lite-16-PoE",
+        # Downlink to host
+        f"{OID_IF_NAME}.1": "Port 1",
+        f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+        f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+        # Uplink candidate 1
+        f"{OID_IF_NAME}.15": "Port 15",
+        f"{OID_LLDP_REM_SYS_NAME}.0.15.1": "SW-A",
+        f"{OID_LLDP_REM_PORT_ID}.0.15.1": "Gi0/1",
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.15.1.1.4.10.0.0.10": 1,
+        # Uplink candidate 2
+        f"{OID_IF_NAME}.16": "Port 16",
+        f"{OID_LLDP_REM_SYS_NAME}.0.16.1": "SW-B",
+        f"{OID_LLDP_REM_PORT_ID}.0.16.1": "Gi0/2",
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.16.1.1.4.10.0.0.20": 1,
+    }
+
+    device_mibs = {
+        unifi_ip: unifi_mib,
+        "10.0.0.10": {
+            OID_SYS_DESCR: "Switch A",
+            OID_SYS_NAME: "SW-A",
+            OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+            OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("000b86112233"),
+            OID_DOT1D_STP_ROOT_PORT: 0,
+        },
+        "10.0.0.20": {OID_SYS_DESCR: "Switch B", OID_SYS_NAME: "SW-B"},
+    }
+
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=unifi_ip, forced_next_ip="10.0.0.10")
+
+    assert result.success is True
+    assert len(result.hops) == 2
+    # Hop 1: resolved and continues
+    hop1 = result.hops[0]
+    assert hop1.hostname == "USW-Lite-16-PoE"
+    assert hop1.status == "ok"
+    assert hop1.uplink_port is not None
+    assert hop1.uplink_port.is_uplink is True
+    assert hop1.uplink_port.neighbor_ip == "10.0.0.10"
+    assert len(hop1.ambiguous_candidates) == 2
+    # Hop 2: SW-A reached as STP root
+    hop2 = result.hops[1]
+    assert hop2.hostname == "SW-A"
+    assert hop2.mgmt_ip == "10.0.0.10"
+    assert hop2.is_stp_root is True
+    assert hop2.status == "root_reached"
+    assert result.edge_type == "stp_root"
+
+
 def test_walker_stp_absent_single_edge_router_neighbor():
     """Verify that when STP is absent and single LLDP neighbor is a router/firewall, walk continues and terminates as edge."""
     from linksight.discovery.demo import UNIFI_DEMO_MIB_WITH_UPSTREAM, UNIFI_GATEWAY_DEMO_MIB

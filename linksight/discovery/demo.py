@@ -491,7 +491,98 @@ UNIFI_DEMO_HOPS_NO_UPSTREAM: list[Hop] = [
 ]
 
 
-def get_unifi_demo_path(variant: str = "with_upstream", start_ip: str = "192.168.1.20") -> UpstreamPath:
+UNIFI_DEMO_HOPS_AMBIGUOUS: list[Hop] = [
+    Hop(
+        hop_index=1,
+        hostname="USW-Lite-16-PoE",
+        mgmt_ip="192.168.1.20",
+        sys_descr="UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        platform="Ubiquiti USW-Lite-16-PoE",
+        device_type="switch",
+        is_stp_root=False,
+        stp_bridge_id="74:83:c2:11:22:33",
+        status="ambiguous",
+        response_time_ms=3.1,
+        ports=[
+            PortDiagnostics(
+                port_id=1,
+                port_name="Port 1",
+                pvid=1,
+                allowed_vlans=[1, 10, 20],
+                stp_state="forwarding",
+                link_speed_mbps=1000,
+                is_downlink=True,
+                neighbor_name="Local-Host",
+                neighbor_port="eth0",
+            ),
+            PortDiagnostics(
+                port_id=15,
+                port_name="Port 15",
+                pvid=1,
+                allowed_vlans=[1, 10, 20],
+                stp_state="unknown",
+                link_speed_mbps=1000,
+                neighbor_name="Aruba-2930F",
+                neighbor_ip="10.0.0.10",
+                neighbor_port="1/1",
+            ),
+            PortDiagnostics(
+                port_id=16,
+                port_name="Port 16",
+                pvid=1,
+                allowed_vlans=[1],
+                stp_state="unknown",
+                link_speed_mbps=1000,
+                neighbor_name="U6-Pro-AP",
+                neighbor_ip="192.168.1.50",
+                neighbor_port="eth0",
+            ),
+        ],
+        uplink_port=None,
+        downlink_port=PortDiagnostics(
+            port_id=1,
+            port_name="Port 1",
+            pvid=1,
+            allowed_vlans=[1, 10, 20],
+            stp_state="forwarding",
+            link_speed_mbps=1000,
+            is_downlink=True,
+            neighbor_name="Local-Host",
+            neighbor_port="eth0",
+        ),
+        ambiguous_candidates=[
+            PortDiagnostics(
+                port_id=15,
+                port_name="Port 15",
+                pvid=1,
+                allowed_vlans=[1, 10, 20],
+                stp_state="unknown",
+                link_speed_mbps=1000,
+                neighbor_name="Aruba-2930F",
+                neighbor_ip="10.0.0.10",
+                neighbor_port="1/1",
+            ),
+            PortDiagnostics(
+                port_id=16,
+                port_name="Port 16",
+                pvid=1,
+                allowed_vlans=[1],
+                stp_state="unknown",
+                link_speed_mbps=1000,
+                neighbor_name="U6-Pro-AP",
+                neighbor_ip="192.168.1.50",
+                neighbor_port="eth0",
+            ),
+        ],
+    ),
+]
+
+
+def get_unifi_demo_path(
+    variant: str = "with_upstream",
+    start_ip: str = "192.168.1.20",
+    forced_next_ip: str | None = None,
+) -> UpstreamPath:
     """Return a canned demo upstream path for a UniFi switch."""
     if variant == "no_upstream":
         return UpstreamPath(
@@ -499,6 +590,141 @@ def get_unifi_demo_path(variant: str = "with_upstream", start_ip: str = "192.168
             hops=UNIFI_DEMO_HOPS_NO_UPSTREAM,
             edge_type="no_upstream",
             edge_summary=f"No upstream neighbor visible from USW-Lite-16-PoE ({start_ip}) via LLDP — this switch appears to be the network edge.",
+            success=True,
+        )
+    if variant == "ambiguous" and not forced_next_ip:
+        return UpstreamPath(
+            start_ip=start_ip,
+            hops=UNIFI_DEMO_HOPS_AMBIGUOUS,
+            edge_type="ambiguous",
+            edge_summary=(
+                f"Walk stopped at hop 1 (USW-Lite-16-PoE): "
+                f"multiple upstream LLDP candidate neighbors found (Aruba-2930F (10.0.0.10), U6-Pro-AP (192.168.1.50)) — "
+                f"verify upstream topology."
+            ),
+            success=False,
+        )
+    if forced_next_ip == "10.0.0.10":
+        aruba_port_down = PortDiagnostics(
+            port_id="1/1",
+            port_name="1/1",
+            pvid=1,
+            allowed_vlans=[1, 10, 20],
+            stp_state="forwarding",
+            link_speed_mbps=1000,
+            is_downlink=True,
+            neighbor_name="USW-Lite-16-PoE",
+            neighbor_ip=start_ip,
+            neighbor_port="Port 15",
+        )
+        hop1 = Hop(
+            hop_index=1,
+            hostname="USW-Lite-16-PoE",
+            mgmt_ip=start_ip,
+            sys_descr="UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+            platform="Ubiquiti USW-Lite-16-PoE",
+            device_type="switch",
+            is_stp_root=False,
+            stp_bridge_id="74:83:c2:11:22:33",
+            status="ok",
+            response_time_ms=3.1,
+            ports=UNIFI_DEMO_HOPS_AMBIGUOUS[0].ports,
+            downlink_port=UNIFI_DEMO_HOPS_AMBIGUOUS[0].downlink_port,
+            uplink_port=PortDiagnostics(
+                port_id=15,
+                port_name="Port 15",
+                pvid=1,
+                allowed_vlans=[1, 10, 20],
+                stp_state="forwarding",
+                link_speed_mbps=1000,
+                is_uplink=True,
+                neighbor_name="Aruba-2930F",
+                neighbor_ip="10.0.0.10",
+                neighbor_port="1/1",
+            ),
+            ambiguous_candidates=UNIFI_DEMO_HOPS_AMBIGUOUS[0].ambiguous_candidates,
+        )
+        hop2 = Hop(
+            hop_index=2,
+            hostname="Aruba-2930F",
+            mgmt_ip="10.0.0.10",
+            sys_descr="Aruba 2930F-24G-4SFP+ Switch (JL259A), WC.16.10.0016",
+            platform="Aruba 2930F",
+            device_type="switch",
+            is_stp_root=True,
+            stp_root_bridge_id="32768 / 00:0b:86:11:22:33",
+            stp_bridge_id="32768 / 00:0b:86:11:22:33",
+            default_gateway="10.0.0.1",
+            status="root_reached",
+            response_time_ms=2.8,
+            ports=[aruba_port_down],
+            downlink_port=aruba_port_down,
+        )
+        return UpstreamPath(
+            start_ip=start_ip,
+            hops=[hop1, hop2],
+            edge_type="stp_root",
+            edge_summary="L2 STP Root reached: Aruba-2930F (10.0.0.10), Gateway: 10.0.0.1",
+            success=True,
+        )
+    if forced_next_ip == "192.168.1.50":
+        ap_port_down = PortDiagnostics(
+            port_id="eth0",
+            port_name="eth0",
+            pvid=1,
+            allowed_vlans=[1],
+            stp_state="unknown",
+            link_speed_mbps=1000,
+            is_downlink=True,
+            neighbor_name="USW-Lite-16-PoE",
+            neighbor_ip=start_ip,
+            neighbor_port="Port 16",
+        )
+        hop1 = Hop(
+            hop_index=1,
+            hostname="USW-Lite-16-PoE",
+            mgmt_ip=start_ip,
+            sys_descr="UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+            platform="Ubiquiti USW-Lite-16-PoE",
+            device_type="switch",
+            is_stp_root=False,
+            stp_bridge_id="74:83:c2:11:22:33",
+            status="ok",
+            response_time_ms=3.1,
+            ports=UNIFI_DEMO_HOPS_AMBIGUOUS[0].ports,
+            downlink_port=UNIFI_DEMO_HOPS_AMBIGUOUS[0].downlink_port,
+            uplink_port=PortDiagnostics(
+                port_id=16,
+                port_name="Port 16",
+                pvid=1,
+                allowed_vlans=[1],
+                stp_state="unknown",
+                link_speed_mbps=1000,
+                is_uplink=True,
+                neighbor_name="U6-Pro-AP",
+                neighbor_ip="192.168.1.50",
+                neighbor_port="eth0",
+            ),
+            ambiguous_candidates=UNIFI_DEMO_HOPS_AMBIGUOUS[0].ambiguous_candidates,
+        )
+        hop2 = Hop(
+            hop_index=2,
+            hostname="U6-Pro-AP",
+            mgmt_ip="192.168.1.50",
+            sys_descr="Ubiquiti UniFi 6 Pro Access Point",
+            platform="Ubiquiti U6-Pro",
+            device_type="unknown",
+            is_stp_root=False,
+            status="no_upstream",
+            response_time_ms=2.1,
+            ports=[ap_port_down],
+            downlink_port=ap_port_down,
+        )
+        return UpstreamPath(
+            start_ip=start_ip,
+            hops=[hop1, hop2],
+            edge_type="no_upstream",
+            edge_summary="No upstream neighbor visible from U6-Pro-AP (192.168.1.50) via LLDP — this switch appears to be the network edge.",
             success=True,
         )
     return UpstreamPath(
@@ -510,10 +736,11 @@ def get_unifi_demo_path(variant: str = "with_upstream", start_ip: str = "192.168
     )
 
 
-def get_demo_path(start_ip: str = "10.0.0.3") -> UpstreamPath:
+def get_demo_path(start_ip: str = "10.0.0.3", forced_next_ip: str | None = None) -> UpstreamPath:
     """Return a canned demo upstream path."""
     if start_ip == "192.168.1.20":
-        return get_unifi_demo_path(variant="with_upstream", start_ip=start_ip)
+        variant = "ambiguous" if not forced_next_ip else "with_upstream"
+        return get_unifi_demo_path(variant=variant, start_ip=start_ip, forced_next_ip=forced_next_ip)
     return UpstreamPath(
         start_ip=start_ip,
         hops=DEMO_HOPS,

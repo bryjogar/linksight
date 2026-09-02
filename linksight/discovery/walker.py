@@ -195,6 +195,8 @@ class UpstreamWalker:
         start_ip: str,
         progress_callback: Callable[[str], None] | None = None,
         endpoint_ip: str | None = None,
+        stop_check: Callable[[], bool] | None = None,
+        forced_next_ip: str | None = None,
     ) -> UpstreamPath:
         """Walk the upstream switch chain starting at start_ip."""
         hops: list[Hop] = []
@@ -206,6 +208,9 @@ class UpstreamWalker:
         edge_summary = ""
 
         while hop_index <= max_hops:
+            if stop_check is not None and stop_check():
+                break
+
             if curr_ip in visited_ips:
                 edge_type = "loop_detected"
                 edge_summary = f"Loop detected: {curr_ip} already visited in path."
@@ -839,17 +844,42 @@ class UpstreamWalker:
                                 continue
                         candidate_uplinks.append(p)
 
-                    if len(candidate_uplinks) == 1:
+                    if forced_next_ip:
+                        forced_port = None
+                        for p in candidate_uplinks:
+                            if p.neighbor_ip == forced_next_ip:
+                                forced_port = p
+                                break
+                        if forced_port is None:
+                            for p in ports_list:
+                                if p.neighbor_ip == forced_next_ip:
+                                    forced_port = p
+                                    break
+                        if forced_port is not None:
+                            uplink_port_diag = forced_port
+                            uplink_port_diag.is_uplink = True
+                            forced_next_ip = None  # consumed
+                    elif len(candidate_uplinks) == 1:
                         uplink_port_diag = candidate_uplinks[0]
                         uplink_port_diag.is_uplink = True
+                elif forced_next_ip:
+                    forced_port = None
+                    for p in ports_list:
+                        if p.neighbor_ip == forced_next_ip:
+                            forced_port = p
+                            break
+                    if forced_port is not None:
+                        uplink_port_diag = forced_port
+                        uplink_port_diag.is_uplink = True
+                        forced_next_ip = None
 
                 hop_status = "ok"
                 if is_root:
                     hop_status = "root_reached"
                 elif not stp_present:
-                    if not candidate_uplinks:
+                    if not candidate_uplinks and uplink_port_diag is None:
                         hop_status = "no_upstream"
-                    elif len(candidate_uplinks) > 1:
+                    elif len(candidate_uplinks) > 1 and uplink_port_diag is None:
                         hop_status = "ambiguous"
 
                 hop = Hop(
@@ -867,6 +897,7 @@ class UpstreamWalker:
                     ports=ports_list,
                     uplink_port=uplink_port_diag,
                     downlink_port=downlink_port_diag,
+                    ambiguous_candidates=list(candidate_uplinks) if (len(candidate_uplinks) > 1 or hop_status == "ambiguous") else [],
                     response_time_ms=(time.perf_counter() - t0) * 1000,
                 )
                 hops.append(hop)
@@ -880,14 +911,14 @@ class UpstreamWalker:
                     break
 
                 if not stp_present:
-                    if not candidate_uplinks:
+                    if not candidate_uplinks and uplink_port_diag is None:
                         edge_type = "no_upstream"
                         edge_summary = (
                             f"No upstream neighbor visible from {sys_name or curr_ip} ({curr_ip}) "
                             f"via LLDP — this switch appears to be the network edge."
                         )
                         break
-                    elif len(candidate_uplinks) > 1:
+                    elif len(candidate_uplinks) > 1 and uplink_port_diag is None:
                         edge_type = "ambiguous"
                         cand_list = [
                             f"{p.neighbor_name} ({p.neighbor_ip})" if p.neighbor_name else str(p.neighbor_ip)

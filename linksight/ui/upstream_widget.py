@@ -71,8 +71,50 @@ def _format_port_status(port: PortDiagnostics) -> tuple[str, str]:
     return ("—", FG_FAINT)
 
 
+def _format_port_details_html(port: PortDiagnostics) -> str:
+    """Format line 2 for compact path port block: PVID, allowed VLANs, STP state, link speed."""
+    parts = []
+
+    # 1. PVID & Allowed VLANs
+    pvid_str = f"PVID {port.pvid}" if port.pvid is not None else ""
+    if port.allowed_vlans:
+        vlans_str = ", ".join(str(v) for v in port.allowed_vlans)
+        vlan_part = f"VLANs {vlans_str}"
+        if pvid_str:
+            parts.append(
+                f"<span style='color:{ACCENT}; font-weight:600;'>{pvid_str}</span> · "
+                f"<span style='color:{FG}; font-weight:600;'>{vlan_part}</span>"
+            )
+        else:
+            parts.append(f"<span style='color:{FG}; font-weight:600;'>{vlan_part}</span>")
+    elif pvid_str:
+        parts.append(f"<span style='color:{ACCENT}; font-weight:600;'>{pvid_str}</span>")
+
+    # 2. STP state
+    st = port.stp_state.lower() if port.stp_state else "unknown"
+    if st != "unknown":
+        stp_col = OK if port.is_forwarding else (DANGER if st in ("blocking", "broken") else WARN)
+        parts.append(f"<span style='color:{stp_col}; font-weight:600;'>STP {st}</span>")
+    elif port.oper_status and port.oper_status.lower() != "unknown":
+        op = port.oper_status.lower()
+        op_col = OK if op == "up" else (DANGER if op == "down" else WARN)
+        parts.append(f"<span style='color:{op_col}; font-weight:600;'>Status {op}</span>")
+
+    # 3. Speed
+    if port.link_speed_mbps is not None:
+        spd_str, spd_col = _format_speed(port.link_speed_mbps)
+        parts.append(f"<span style='color:{spd_col}; font-weight:600;'>{spd_str}</span>")
+
+    if not parts:
+        return ""
+    joined = " · ".join(parts)
+    return f"<span style='color:{FG_DIM}; font-family:{MONO}; font-size:11px;'>{joined}</span>"
+
+
 class HopCardWidget(QFrame):
     """An expandable card displaying a single hop in the upstream chain."""
+
+    continue_from = Signal(str)
 
     def __init__(self, hop: Hop, parent=None):
         super().__init__(parent)
@@ -268,17 +310,6 @@ class HopCardWidget(QFrame):
                 d_name = downlink.port_name or f"Port {downlink.port_id}"
                 d_spd_str, d_spd_col = _format_speed(downlink.link_speed_mbps)
                 d_st_str, d_st_col = _format_port_status(downlink)
-                d_pvid = f"PVID {downlink.pvid}" if downlink.pvid is not None else ""
-
-                d_top_html = (
-                    f"<span style='color:{OK}; font-weight:700; font-size:10px; font-family:{MONO};'>▼ DOWNLINK</span> "
-                    f"<span style='color:{FG}; font-family:{MONO}; font-weight:700; font-size:12px;'>{d_name}</span> "
-                    f"<span style='color:{d_spd_col}; font-family:{MONO}; font-weight:600; font-size:11px;'>{d_spd_str}</span> "
-                    f"<span style='color:{d_st_col}; font-family:{MONO}; font-weight:600; font-size:11px;'>{d_st_str}</span> "
-                    f"{f'<span style=\"color:{FG_DIM}; font-size:11px;\">{d_pvid}</span>' if d_pvid else ''}"
-                )
-                d_top_lbl = QLabel(d_top_html)
-                down_vbox.addWidget(d_top_lbl)
 
                 d_parts = []
                 if downlink.neighbor_name:
@@ -288,11 +319,22 @@ class HopCardWidget(QFrame):
                 if downlink.neighbor_port:
                     d_parts.append(f"on {downlink.neighbor_port}")
                 d_neigh_str = " ".join(d_parts)
+                d_neigh_html = f" <span style='color:{FG_DIM}; font-size:11px;'>◀ {d_neigh_str}</span>" if d_neigh_str else ""
 
-                if d_neigh_str:
-                    d_sub_lbl = QLabel(f"◀ {d_neigh_str}")
-                    d_sub_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
-                    down_vbox.addWidget(d_sub_lbl)
+                d_top_html = (
+                    f"<span style='color:{OK}; font-weight:700; font-size:10px; font-family:{MONO};'>▼ DOWNLINK</span> "
+                    f"<span style='color:{FG}; font-family:{MONO}; font-weight:700; font-size:12px;'>{d_name}</span> "
+                    f"<span style='color:{d_spd_col}; font-family:{MONO}; font-weight:600; font-size:11px;'>{d_spd_str}</span> "
+                    f"<span style='color:{d_st_col}; font-family:{MONO}; font-weight:600; font-size:11px;'>{d_st_str}</span>"
+                    f"{d_neigh_html}"
+                )
+                d_top_lbl = QLabel(d_top_html)
+                down_vbox.addWidget(d_top_lbl)
+
+                d_detail_html = _format_port_details_html(downlink)
+                if d_detail_html:
+                    d_detail_lbl = QLabel(d_detail_html)
+                    down_vbox.addWidget(d_detail_lbl)
 
                 path_layout.addWidget(down_widget)
 
@@ -322,17 +364,6 @@ class HopCardWidget(QFrame):
                 u_name = uplink.port_name or f"Port {uplink.port_id}"
                 u_spd_str, u_spd_col = _format_speed(uplink.link_speed_mbps)
                 u_st_str, u_st_col = _format_port_status(uplink)
-                u_pvid = f"PVID {uplink.pvid}" if uplink.pvid is not None else ""
-
-                u_top_html = (
-                    f"<span style='color:{ACCENT}; font-weight:700; font-size:10px; font-family:{MONO};'>▲ {u_tag}</span> "
-                    f"<span style='color:{FG}; font-family:{MONO}; font-weight:700; font-size:12px;'>{u_name}</span> "
-                    f"<span style='color:{u_spd_col}; font-family:{MONO}; font-weight:600; font-size:11px;'>{u_spd_str}</span> "
-                    f"<span style='color:{u_st_col}; font-family:{MONO}; font-weight:600; font-size:11px;'>{u_st_str}</span> "
-                    f"{f'<span style=\"color:{FG_DIM}; font-size:11px;\">{u_pvid}</span>' if u_pvid else ''}"
-                )
-                u_top_lbl = QLabel(u_top_html)
-                up_vbox.addWidget(u_top_lbl)
 
                 u_parts = []
                 if uplink.neighbor_name:
@@ -342,11 +373,22 @@ class HopCardWidget(QFrame):
                 if uplink.neighbor_port:
                     u_parts.append(f"on {uplink.neighbor_port}")
                 u_neigh_str = " ".join(u_parts)
+                u_neigh_html = f" <span style='color:{FG_DIM}; font-size:11px;'>▶ {u_neigh_str}</span>" if u_neigh_str else ""
 
-                if u_neigh_str:
-                    u_sub_lbl = QLabel(f"▶ {u_neigh_str}")
-                    u_sub_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
-                    up_vbox.addWidget(u_sub_lbl)
+                u_top_html = (
+                    f"<span style='color:{ACCENT}; font-weight:700; font-size:10px; font-family:{MONO};'>▲ {u_tag}</span> "
+                    f"<span style='color:{FG}; font-family:{MONO}; font-weight:700; font-size:12px;'>{u_name}</span> "
+                    f"<span style='color:{u_spd_col}; font-family:{MONO}; font-weight:600; font-size:11px;'>{u_spd_str}</span> "
+                    f"<span style='color:{u_st_col}; font-family:{MONO}; font-weight:600; font-size:11px;'>{u_st_str}</span>"
+                    f"{u_neigh_html}"
+                )
+                u_top_lbl = QLabel(u_top_html)
+                up_vbox.addWidget(u_top_lbl)
+
+                u_detail_html = _format_port_details_html(uplink)
+                if u_detail_html:
+                    u_detail_lbl = QLabel(u_detail_html)
+                    up_vbox.addWidget(u_detail_lbl)
 
                 path_layout.addWidget(up_widget)
 
@@ -362,6 +404,51 @@ class HopCardWidget(QFrame):
             err_lbl = QLabel(f"Error: {self.hop.error_message}")
             err_lbl.setStyleSheet(f"color: {DANGER}; font-size: 11px;")
             body_layout.addWidget(err_lbl)
+
+        # Ambiguous candidate continuation buttons
+        candidates = list(self.hop.ambiguous_candidates)
+        if not candidates and self.hop.status == "ambiguous":
+            candidates = [p for p in self.hop.ports if p.neighbor_ip and not p.is_downlink]
+
+        if self.hop.status == "ambiguous" and candidates:
+            cand_frame = QFrame()
+            cand_frame.setObjectName("ambiguous_candidates")
+            cand_frame.setStyleSheet(
+                f"QFrame#ambiguous_candidates {{ background-color: {BG_INPUT}; border: 1px solid {WARN}; "
+                f"border-radius: 4px; padding: 6px 10px; }}"
+            )
+            cand_layout = QVBoxLayout(cand_frame)
+            cand_layout.setContentsMargins(8, 6, 8, 6)
+            cand_layout.setSpacing(6)
+
+            cand_title = QLabel("Multiple upstream candidates found — choose a path to continue discovery:")
+            cand_title.setStyleSheet(f"color: {WARN}; font-weight: 600; font-size: 11px;")
+            cand_layout.addWidget(cand_title)
+
+            btn_row = QHBoxLayout()
+            btn_row.setSpacing(8)
+
+            for cand in candidates:
+                cand_name = cand.neighbor_name or "Neighbor"
+                cand_ip = cand.neighbor_ip or ""
+                cand_port = cand.port_name or (f"Port {cand.port_id}" if cand.port_id is not None else "")
+                port_suffix = f" on {cand_port}" if cand_port else ""
+                btn_text = f"▶ Try {cand_name} ({cand_ip}){port_suffix}"
+                cand_btn = QPushButton(btn_text)
+                cand_btn.setObjectName(f"candidate_btn_{cand_ip}")
+                cand_btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {BG_PANEL}; border: 1px solid {BORDER_STRONG}; "
+                    f"color: {ACCENT}; font-size: 11px; font-weight: 600; font-family: {MONO}; "
+                    f"padding: 4px 10px; border-radius: 4px; text-align: left; }} "
+                    f"QPushButton:hover {{ background-color: #1e3a5f; color: #ffffff; border-color: {ACCENT}; }}"
+                )
+                cand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                cand_btn.clicked.connect(lambda checked=False, target_ip=cand_ip: self.continue_from.emit(target_ip))
+                btn_row.addWidget(cand_btn)
+
+            btn_row.addStretch(1)
+            cand_layout.addLayout(btn_row)
+            body_layout.addWidget(cand_frame)
 
         # Per-port diagnostics table (collapsed by default behind "All N ports" toggle)
         if self.hop.ports:
@@ -526,6 +613,7 @@ class UpstreamWidget(QWidget):
     """Panel displaying the full upstream discovery chain path and hop diagnostics."""
 
     refresh_requested = Signal()
+    continue_from = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -616,6 +704,7 @@ class UpstreamWidget(QWidget):
         # Add Hop Cards
         for hop in path.hops:
             card = HopCardWidget(hop)
+            card.continue_from.connect(self.continue_from.emit)
             self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
 
     def clear(self) -> None:

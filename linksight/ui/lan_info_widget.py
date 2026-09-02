@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from PySide6.QtCore import Qt, Signal, QTimer, QThread
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, QLabel,
@@ -34,13 +35,28 @@ class InterfaceConfigWorker(QThread):
     """Background worker thread for fetching interface configuration without blocking UI."""
 
     finished = Signal(object)  # InterfaceConfig
+    cancelled = Signal()
 
     def __init__(self, iface_name: str, parent=None):
         super().__init__(parent)
         self.iface_name = iface_name
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._stop_event.is_set()
 
     def run(self) -> None:
+        if self._stop_event.is_set():
+            self.cancelled.emit()
+            return
         cfg = get_interface_config(self.iface_name)
+        if self._stop_event.is_set():
+            self.cancelled.emit()
+            return
         self.finished.emit(cfg)
 
 
@@ -129,6 +145,7 @@ class LanInfoWidget(QWidget):
 
         self._worker = InterfaceConfigWorker(self._iface_name, parent=self)
         self._worker.finished.connect(self._on_worker_finished)
+        self._worker.cancelled.connect(self._on_worker_cancelled)
         self._worker.start()
 
     def _on_worker_finished(self, cfg: InterfaceConfig) -> None:
@@ -138,6 +155,13 @@ class LanInfoWidget(QWidget):
             self._render_current()
             self.config_updated.emit(cfg)
 
+        self._worker = None
+
+        if self._pending_refresh:
+            self._pending_refresh = False
+            self._debounce_timer.start(int(self._min_interval * 1000))
+
+    def _on_worker_cancelled(self) -> None:
         self._worker = None
 
         if self._pending_refresh:
@@ -190,6 +214,6 @@ class LanInfoWidget(QWidget):
         if self._debounce_timer.isActive():
             self._debounce_timer.stop()
         if self._worker is not None and self._worker.isRunning():
-            self._worker.terminate()
-            self._worker.wait(500)
+            self._worker.stop()
+            self._worker.wait(2000)
         super().closeEvent(event)
