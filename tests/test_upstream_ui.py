@@ -48,14 +48,18 @@ def test_upstream_widget_render_demo_path():
             card_count += 1
             cards.append(w)
             assert w.hop is not None
-            assert w.expanded is True
-            # Test whole-card toggle
-            w._toggle_expand()
             assert w.expanded is False
             assert w.body.isHidden() is True
+            assert w.toggle_btn.text() == "Details"
+            # Test whole-card toggle
             w._toggle_expand()
             assert w.expanded is True
             assert not w.body.isHidden()
+            assert w.toggle_btn.text() == "Hide details"
+            w._toggle_expand()
+            assert w.expanded is False
+            assert w.body.isHidden() is True
+            assert w.toggle_btn.text() == "Details"
 
     assert card_count == 3
 
@@ -966,5 +970,120 @@ def test_candidate_button_renders_no_ip_label_format():
     assert cand_diag.neighbor_chassis == "74:83:c2:11:22:33"
 
     widget.close()
+
+
+def test_upstream_widget_breadcrumb_full_chain_in_order():
+    """Verify that breadcrumb hero bar contains the full path chain in order:
+    'You (Port 3) → Access-SW2 → Core-SW1 → FW-Edge01 → Internet (203.0.113.1)'
+    with the edge state as the colored element.
+    """
+    app = QApplication.instance() or QApplication([])
+    widget = UpstreamWidget()
+    widget.show()
+    path = get_demo_path("10.0.0.3")
+    widget.show_path(path)
+
+    text = widget.breadcrumb_bar.text()
+    assert "You (Port 3)" in text
+    assert "Access-SW2" in text
+    assert "Core-SW1" in text
+    assert "FW-Edge01" in text
+    assert "203.0.113.1" in text
+    assert "NETWORK EDGE" in text
+
+    idx_you = text.index("You (Port 3)")
+    idx_hop1 = text.index("Access-SW2")
+    idx_hop2 = text.index("Core-SW1")
+    idx_hop3 = text.index("FW-Edge01")
+    idx_gw = text.index("203.0.113.1")
+    idx_edge = text.index("NETWORK EDGE")
+
+    assert idx_you < idx_hop1 < idx_hop2 < idx_hop3 < idx_gw < idx_edge
+    widget.close()
+
+
+def test_hop_cards_default_collapsed_for_fresh_path_render():
+    """Verify that all hop cards render collapsed by default for a fresh path."""
+    app = QApplication.instance() or QApplication([])
+    widget = UpstreamWidget()
+    widget.show()
+    path = get_demo_path("10.0.0.3")
+    widget.show_path(path)
+
+    cards = [
+        widget.cards_layout.itemAt(i).widget()
+        for i in range(widget.cards_layout.count())
+        if isinstance(widget.cards_layout.itemAt(i).widget(), HopCardWidget)
+    ]
+    assert len(cards) == 3
+    for card in cards:
+        assert card.expanded is False
+        assert card.body.isHidden() is True
+        assert card.toggle_btn.text() == "Details"
+
+    widget.close()
+
+
+def test_special_state_hop_shows_exactly_one_tag_and_normal_hop_zero():
+    """Verify that special-state hops show exactly one status tag in header row,
+    and a normal intermediate hop shows zero status tags (no redundant visual noise).
+    """
+    from PySide6.QtWidgets import QLabel
+    from linksight.discovery.models import Hop, PortDiagnostics
+
+    app = QApplication.instance() or QApplication([])
+
+    up = PortDiagnostics(port_id=24, port_name="Gi1/0/24", is_uplink=True, neighbor_name="Core-SW1")
+    down = PortDiagnostics(port_id=1, port_name="Port 1", is_downlink=True)
+
+    # 1. Normal intermediate switch — zero special state tags
+    hop_normal = Hop(hop_index=1, hostname="SW-Normal", mgmt_ip="10.0.0.5", status="ok", uplink_port=up, ports=[up, down])
+    card_normal = HopCardWidget(hop_normal)
+    # Tags have specific background colors: #422006 (WARN), #064e3b (OK), #450a0a (DANGER)
+    header_tags_normal = [
+        lbl for lbl in card_normal.findChildren(QLabel)
+        if any(c in (lbl.styleSheet() or "") for c in ("#422006", "#064e3b", "#450a0a"))
+    ]
+    assert len(header_tags_normal) == 0
+
+    # 2. Ambiguous hop — exactly one tag (AMBIGUOUS UPLINK)
+    hop_ambig = Hop(hop_index=1, hostname="SW-Ambig", mgmt_ip="10.0.0.6", status="ambiguous", ports=[down])
+    card_ambig = HopCardWidget(hop_ambig)
+    header_tags_ambig = [
+        lbl for lbl in card_ambig.findChildren(QLabel)
+        if any(c in (lbl.styleSheet() or "") for c in ("#422006", "#064e3b", "#450a0a"))
+    ]
+    assert len(header_tags_ambig) == 1
+    assert "AMBIGUOUS UPLINK" in header_tags_ambig[0].text()
+
+    # 3. Claimed root mesh hop — exactly one tag (CLAIMED ROOT · MESH UPLINK)
+    hop_mesh = Hop(hop_index=1, hostname="SW-Mesh", mgmt_ip="10.0.0.7", status="root_claimed_but_uplinks_present", ports=[down])
+    card_mesh = HopCardWidget(hop_mesh)
+    header_tags_mesh = [
+        lbl for lbl in card_mesh.findChildren(QLabel)
+        if any(c in (lbl.styleSheet() or "") for c in ("#422006", "#064e3b", "#450a0a"))
+    ]
+    assert len(header_tags_mesh) == 1
+    assert "CLAIMED ROOT · MESH UPLINK" in header_tags_mesh[0].text()
+
+    # 4. Network edge hop — exactly one tag (NETWORK EDGE)
+    hop_edge = Hop(hop_index=1, hostname="SW-Edge", mgmt_ip="10.0.0.8", status="no_upstream", ports=[down])
+    card_edge = HopCardWidget(hop_edge)
+    header_tags_edge = [
+        lbl for lbl in card_edge.findChildren(QLabel)
+        if any(c in (lbl.styleSheet() or "") for c in ("#422006", "#064e3b", "#450a0a"))
+    ]
+    assert len(header_tags_edge) == 1
+    assert "NETWORK EDGE" in header_tags_edge[0].text()
+
+    # 5. Firewall edge hop — exactly one tag (FIREWALL EDGE)
+    hop_fw = Hop(hop_index=1, hostname="FW-Edge", mgmt_ip="10.0.0.9", device_type="firewall", status="router_reached", ports=[down])
+    card_fw = HopCardWidget(hop_fw)
+    header_tags_fw = [
+        lbl for lbl in card_fw.findChildren(QLabel)
+        if any(c in (lbl.styleSheet() or "") for c in ("#422006", "#064e3b", "#450a0a"))
+    ]
+    assert len(header_tags_fw) == 1
+    assert "FIREWALL EDGE" in header_tags_fw[0].text()
 
 

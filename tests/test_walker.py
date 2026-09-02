@@ -1119,6 +1119,129 @@ def test_walker_hop1_fdb_no_match_downlink_stays_none():
     assert hop.downlink_port is None
 
 
+def test_walker_hop1_fdb_beats_same_subnet_lldp_phone():
+    """Regression test: Switch LLDP table shows TWO same-subnet LLDP neighbors
+    (desk phone on port 4 with neighbor_ip in endpoint's /24, and another device on port 5)
+    AND the switch FDB table has the endpoint MAC on port 3.
+    Downlink MUST resolve to port 3 via FDB, not port 4 via subnet match.
+    """
+    from linksight.discovery.walker import (
+        OID_DOT1D_TP_FDB_PORT,
+        OID_LLDP_REM_SYS_NAME,
+        OID_LLDP_REM_PORT_ID,
+        OID_LLDP_REM_MAN_ADDR_TABLE,
+    )
+
+    sw_ip = "10.0.0.10"
+    endpoint_ip = "10.0.0.42"
+    endpoint_mac = "00:11:22:33:44:55"
+
+    sw_mib = {
+        OID_SYS_DESCR: "Aruba 2930F-24G-4SFP+",
+        OID_SYS_NAME: "Aruba-2930F",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("000b86112233"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        # Port 3 (Laptop - in FDB, no LLDP)
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.3": 3,
+        f"{OID_IF_NAME}.3": "Port 3",
+        f"{OID_IF_HIGH_SPEED}.3": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.3": 5,
+        f"{OID_DOT1Q_PVID}.3": 1,
+        f"{OID_DOT1D_TP_FDB_PORT}.0.17.34.51.68.85": 3,
+        # Port 4 (Desk phone - has LLDP IP in same /24 as laptop)
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.4": 4,
+        f"{OID_IF_NAME}.4": "Port 4",
+        f"{OID_IF_HIGH_SPEED}.4": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.4": 5,
+        f"{OID_DOT1Q_PVID}.4": 1,
+        f"{OID_LLDP_REM_SYS_NAME}.0.4.1": "Desk-Phone-Yealink",
+        f"{OID_LLDP_REM_PORT_ID}.0.4.1": "eth0",
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.4.1.1.4.10.0.0.50": 1,
+        # Port 5 (Another device - has LLDP IP in same /24 as laptop)
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.5": 5,
+        f"{OID_IF_NAME}.5": "Port 5",
+        f"{OID_IF_HIGH_SPEED}.5": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.5": 5,
+        f"{OID_DOT1Q_PVID}.5": 1,
+        f"{OID_LLDP_REM_SYS_NAME}.0.5.1": "Office-Printer",
+        f"{OID_LLDP_REM_PORT_ID}.0.5.1": "eth0",
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.5.1.1.4.10.0.0.60": 1,
+        OID_IP_ROUTE_NEXT_HOP_DEFAULT: "10.0.0.1",
+    }
+
+    factory = make_mock_client_factory({sw_ip: sw_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip, endpoint_ip=endpoint_ip, endpoint_mac=endpoint_mac)
+
+    assert len(result.hops) == 1
+    hop = result.hops[0]
+    assert hop.downlink_port is not None
+    assert hop.downlink_port.port_id == 3
+    assert hop.downlink_port.port_name == "Port 3"
+    assert hop.downlink_port.is_downlink is True
+    assert hop.downlink_port.neighbor_name == "Endpoint"
+
+
+def test_walker_hop1_fdb_absent_two_subnet_neighbors_stays_undetermined():
+    """Regression test: Switch FDB has no entry for endpoint MAC, and switch LLDP table
+    shows TWO same-subnet LLDP neighbors (phone on port 4 and printer on port 5 in endpoint's /24).
+    Because subnet match is ambiguous (multiple devices in /24), downlink must stay undetermined
+    (does NOT guess the phone).
+    """
+    from linksight.discovery.walker import (
+        OID_LLDP_REM_SYS_NAME,
+        OID_LLDP_REM_PORT_ID,
+        OID_LLDP_REM_MAN_ADDR_TABLE,
+    )
+
+    sw_ip = "10.0.0.10"
+    endpoint_ip = "10.0.0.42"
+    endpoint_mac = "00:11:22:33:44:55"
+
+    sw_mib = {
+        OID_SYS_DESCR: "Aruba 2930F-24G-4SFP+",
+        OID_SYS_NAME: "Aruba-2930F",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("000b86112233"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        # Port 3 (Laptop - no FDB entry, no LLDP)
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.3": 3,
+        f"{OID_IF_NAME}.3": "Port 3",
+        f"{OID_IF_HIGH_SPEED}.3": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.3": 5,
+        f"{OID_DOT1Q_PVID}.3": 1,
+        # Port 4 (Desk phone - has LLDP IP in same /24 as laptop)
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.4": 4,
+        f"{OID_IF_NAME}.4": "Port 4",
+        f"{OID_IF_HIGH_SPEED}.4": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.4": 5,
+        f"{OID_DOT1Q_PVID}.4": 1,
+        f"{OID_LLDP_REM_SYS_NAME}.0.4.1": "Desk-Phone-Yealink",
+        f"{OID_LLDP_REM_PORT_ID}.0.4.1": "eth0",
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.4.1.1.4.10.0.0.50": 1,
+        # Port 5 (Another device - has LLDP IP in same /24 as laptop)
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.5": 5,
+        f"{OID_IF_NAME}.5": "Port 5",
+        f"{OID_IF_HIGH_SPEED}.5": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.5": 5,
+        f"{OID_DOT1Q_PVID}.5": 1,
+        f"{OID_LLDP_REM_SYS_NAME}.0.5.1": "Office-Printer",
+        f"{OID_LLDP_REM_PORT_ID}.0.5.1": "eth0",
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.5.1.1.4.10.0.0.60": 1,
+        OID_IP_ROUTE_NEXT_HOP_DEFAULT: "10.0.0.1",
+    }
+
+    factory = make_mock_client_factory({sw_ip: sw_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip, endpoint_ip=endpoint_ip, endpoint_mac=endpoint_mac)
+
+    assert len(result.hops) == 1
+    hop = result.hops[0]
+    # Downlink remains None — does NOT guess the desk phone
+    assert hop.downlink_port is None
+
+
 def test_walker_stp_root_with_lldp_candidate_mesh():
     """Verify that when a switch claims STP root but LLDP reveals upstream neighbor candidates
     (such as across a wireless mesh backhaul where BPDUs are dropped), the walker distrusts

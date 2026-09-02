@@ -922,80 +922,19 @@ class UpstreamWalker:
 
                 downlink_port_diag: PortDiagnostics | None = None
 
-                if prev_hop_ip or prev_hop_name:
-                    # 1. Exact mgmt IP match on neighbor_ip
-                    if prev_hop_ip:
-                        for p in ports_list:
-                            if p is not uplink_port_diag and p.neighbor_ip == prev_hop_ip:
-                                downlink_port_diag = p
-                                break
-
-                    # 2. Hostname match on neighbor_name
-                    if downlink_port_diag is None and prev_hop_name:
-                        for p in ports_list:
-                            if p is not uplink_port_diag and p.neighbor_name:
-                                p_n = p.neighbor_name.strip().lower()
-                                h_n = prev_hop_name.strip().lower()
-                                if p_n == h_n or h_n in p_n or p_n in h_n:
-                                    downlink_port_diag = p
-                                    break
-
-                    # 3. ARP table check (ipNetToMedia)
-                    if downlink_port_diag is None and prev_hop_ip:
-                        try:
-                            for oid, val in client.walk(OID_IP_NET_TO_MEDIA_TABLE):
-                                parts = oid.strip(".").split(".")
-                                if len(parts) >= 6 and ".".join(parts[-4:]) == prev_hop_ip:
-                                    cand_idx = int(parts[-5]) if parts[-5].isdigit() else None
-                                    if cand_idx is not None:
-                                        for p in ports_list:
-                                            if p is not uplink_port_diag and (p.port_id == cand_idx or port_ifindex_map.get(p.port_id) == cand_idx):
-                                                downlink_port_diag = p
-                                                break
-                                        if downlink_port_diag:
-                                            break
-                                elif isinstance(val, (str, bytes)):
-                                    ip_str = val if isinstance(val, str) else ".".join(str(b) for b in val)
-                                    if ip_str == prev_hop_ip:
-                                        cand_idx = _parse_last_oid_index(oid)
-                                        if cand_idx is not None:
-                                            for p in ports_list:
-                                                if p is not uplink_port_diag and (p.port_id == cand_idx or port_ifindex_map.get(p.port_id) == cand_idx):
-                                                    downlink_port_diag = p
-                                                    break
-                                            if downlink_port_diag:
-                                                break
-                        except Exception:
-                            pass
-
-                    # 4. Subnet match via ipAddrTable or neighbor_ip
-                    if downlink_port_diag is None and prev_hop_ip:
-                        try:
-                            import ipaddress
-                            for p in ports_list:
-                                if p is not uplink_port_diag and p.neighbor_ip:
-                                    try:
-                                        if ipaddress.IPv4Network(f"{p.neighbor_ip}/24", strict=False) == ipaddress.IPv4Network(f"{prev_hop_ip}/24", strict=False):
-                                            downlink_port_diag = p
-                                            break
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
-
-                # 5. Hop 1 fallback: match neighbor_name indicating endpoint
-                if downlink_port_diag is None and hop_index == 1:
+                # 1. Exact mgmt IP match on neighbor_ip (strongest when endpoint/peer advertises LLDP IP)
+                if prev_hop_ip:
                     for p in ports_list:
-                        if p is not uplink_port_diag and p.neighbor_name:
-                            if any(k in p.neighbor_name.lower() for k in ("local-host", "endpoint", "host", "localhost")):
-                                downlink_port_diag = p
-                                break
+                        if p is not uplink_port_diag and p.neighbor_ip == prev_hop_ip:
+                            downlink_port_diag = p
+                            break
 
-                # 6. Hop 1 FDB fallback (BRIDGE-MIB dot1dTpFdbTable) for LLDP-silent endpoints
+                # 2. Hop 1 FDB match (BRIDGE-MIB dot1dTpFdbTable) for LLDP-silent endpoints
+                # Authoritative answer: switch learned endpoint's actual MAC on this physical port.
                 if downlink_port_diag is None and hop_index == 1 and norm_endpoint_mac:
                     try:
                         matched_bridge_port: int | None = None
-                        # 1. Exact GET optimization
+                        # Exact GET optimization
                         try:
                             m_octets = [str(int(norm_endpoint_mac[i : i + 2], 16)) for i in range(0, 12, 2)]
                             exact_oid = f"{OID_DOT1D_TP_FDB_PORT}.{'.'.join(m_octets)}"
@@ -1005,7 +944,7 @@ class UpstreamWalker:
                         except Exception:
                             pass
 
-                        # 2. Walk dot1dTpFdbPort (capped at 200 rows and 2.0s time bound)
+                        # Walk dot1dTpFdbPort (capped at 200 rows and 2.0s time bound)
                         if matched_bridge_port is None:
                             fdb_start = time.perf_counter()
                             for oid, val in client.walk(OID_DOT1D_TP_FDB_PORT, max_rows=200):
@@ -1040,6 +979,72 @@ class UpstreamWalker:
                                     downlink_port_diag.neighbor_name = "Endpoint"
                     except Exception:
                         pass
+
+                # 3. Hostname match on neighbor_name
+                if downlink_port_diag is None and prev_hop_name:
+                    for p in ports_list:
+                        if p is not uplink_port_diag and p.neighbor_name:
+                            p_n = p.neighbor_name.strip().lower()
+                            h_n = prev_hop_name.strip().lower()
+                            if p_n == h_n or h_n in p_n or p_n in h_n:
+                                downlink_port_diag = p
+                                break
+
+                # 4. ARP table check (ipNetToMedia)
+                if downlink_port_diag is None and prev_hop_ip:
+                    try:
+                        for oid, val in client.walk(OID_IP_NET_TO_MEDIA_TABLE):
+                            parts = oid.strip(".").split(".")
+                            if len(parts) >= 6 and ".".join(parts[-4:]) == prev_hop_ip:
+                                cand_idx = int(parts[-5]) if parts[-5].isdigit() else None
+                                if cand_idx is not None:
+                                    for p in ports_list:
+                                        if p is not uplink_port_diag and (p.port_id == cand_idx or port_ifindex_map.get(p.port_id) == cand_idx):
+                                            downlink_port_diag = p
+                                            break
+                                    if downlink_port_diag:
+                                        break
+                            elif isinstance(val, (str, bytes)):
+                                ip_str = val if isinstance(val, str) else ".".join(str(b) for b in val)
+                                if ip_str == prev_hop_ip:
+                                    cand_idx = _parse_last_oid_index(oid)
+                                    if cand_idx is not None:
+                                        for p in ports_list:
+                                            if p is not uplink_port_diag and (p.port_id == cand_idx or port_ifindex_map.get(p.port_id) == cand_idx):
+                                                downlink_port_diag = p
+                                                break
+                                        if downlink_port_diag:
+                                            break
+                    except Exception:
+                        pass
+
+                # 5. Subnet match via neighbor_ip (last resort weak guess)
+                # Only accept when EXACTLY ONE candidate port in the subnet exists.
+                # If zero or multiple candidate ports exist in the same /24, skip (ambiguous).
+                if downlink_port_diag is None and prev_hop_ip:
+                    try:
+                        import ipaddress
+                        prev_net = ipaddress.IPv4Network(f"{prev_hop_ip}/24", strict=False)
+                        subnet_candidates: list[PortDiagnostics] = []
+                        for p in ports_list:
+                            if p is not uplink_port_diag and p.neighbor_ip:
+                                try:
+                                    if ipaddress.IPv4Network(f"{p.neighbor_ip}/24", strict=False) == prev_net:
+                                        subnet_candidates.append(p)
+                                except Exception:
+                                    pass
+                        if len(subnet_candidates) == 1:
+                            downlink_port_diag = subnet_candidates[0]
+                    except Exception:
+                        pass
+
+                # 6. Hop 1 fallback: match neighbor_name keyword indicating endpoint
+                if downlink_port_diag is None and hop_index == 1:
+                    for p in ports_list:
+                        if p is not uplink_port_diag and p.neighbor_name:
+                            if any(k in p.neighbor_name.lower() for k in ("local-host", "endpoint", "host", "localhost")):
+                                downlink_port_diag = p
+                                break
 
                 if downlink_port_diag is not None:
                     downlink_port_diag.is_downlink = True

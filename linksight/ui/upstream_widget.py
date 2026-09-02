@@ -130,7 +130,7 @@ class HopCardWidget(QFrame):
     def __init__(self, hop: Hop, parent=None):
         super().__init__(parent)
         self.hop = hop
-        self.expanded = True
+        self.expanded = False
         self.ports_expanded = False
         self.ports_toggle_btn: QPushButton | None = None
         self.table: QTableWidget | None = None
@@ -145,106 +145,185 @@ class HopCardWidget(QFrame):
         main_layout.setContentsMargins(8, 6, 8, 6)
         main_layout.setSpacing(6)
 
-        # Header Row
+        # Header Row (Compact single-line default view, 13px+)
         header = QHBoxLayout()
         header.setSpacing(8)
 
-        # Hop index badge
+        # Hop index badge (monochrome, 12px)
         badge = QLabel(f" HOP {self.hop.hop_index} ")
         badge.setStyleSheet(
-            f"background-color: {BG_INPUT}; color: {ACCENT}; font-weight: 700; "
-            f"font-size: 11px; border: 1px solid {BORDER_STRONG}; border-radius: 4px; padding: 2px 4px;"
+            f"background-color: {BG_INPUT}; color: {FG_DIM}; font-weight: 700; "
+            f"font-size: 12px; border: 1px solid {BORDER}; border-radius: 4px; padding: 2px 6px;"
         )
         header.addWidget(badge)
 
-        # Hostname and IP
+        # Hostname and IP (13px, high-contrast FG)
         title_text = f"{self.hop.hostname or 'Unknown Switch'} ({self.hop.mgmt_ip})"
         title = QLabel(title_text)
-        title.setStyleSheet(f"color: {FG}; font-weight: 600; font-size: 13px; font-family: {MONO};")
+        title.setStyleSheet(f"color: {FG}; font-weight: 600; font-size: 13px;")
         header.addWidget(title)
 
-        # STP / Role Status Tag
+        # Special state tag (ONLY when hop has a special state, color = state only)
+        tag: QLabel | None = None
         if self.hop.status == "root_claimed_but_uplinks_present":
             tag = QLabel(" CLAIMED ROOT · MESH UPLINK ")
             tag.setStyleSheet(
                 f"background-color: #422006; color: {WARN}; font-weight: 700; "
-                f"font-size: 10px; border-radius: 3px; padding: 2px 4px;"
+                f"font-size: 12px; border-radius: 3px; padding: 2px 6px;"
             )
-            header.addWidget(tag)
-        elif self.hop.is_stp_root:
-            tag = QLabel(" STP ROOT BRIDGE ")
-            tag.setStyleSheet(
-                f"background-color: #064e3b; color: {OK}; font-weight: 700; "
-                f"font-size: 10px; border-radius: 3px; padding: 2px 4px;"
-            )
-            header.addWidget(tag)
-        elif self.hop.status == "no_upstream":
-            tag = QLabel(" NETWORK EDGE ")
-            tag.setStyleSheet(
-                f"background-color: #064e3b; color: {OK}; font-weight: 700; "
-                f"font-size: 10px; border-radius: 3px; padding: 2px 4px;"
-            )
-            header.addWidget(tag)
         elif self.hop.status == "ambiguous":
             tag = QLabel(" AMBIGUOUS UPLINK ")
             tag.setStyleSheet(
                 f"background-color: #422006; color: {WARN}; font-weight: 700; "
-                f"font-size: 10px; border-radius: 3px; padding: 2px 4px;"
+                f"font-size: 12px; border-radius: 3px; padding: 2px 6px;"
             )
-            header.addWidget(tag)
+        elif self.hop.status == "no_upstream":
+            tag = QLabel(" NETWORK EDGE ")
+            tag.setStyleSheet(
+                f"background-color: #064e3b; color: {OK}; font-weight: 700; "
+                f"font-size: 12px; border-radius: 3px; padding: 2px 6px;"
+            )
         elif self.hop.device_type in ("firewall", "router"):
             tag = QLabel(f" {self.hop.device_type.upper()} EDGE ")
             tag.setStyleSheet(
-                f"background-color: #1e3a5f; color: {ACCENT}; font-weight: 700; "
-                f"font-size: 10px; border-radius: 3px; padding: 2px 4px;"
+                f"background-color: #064e3b; color: {OK}; font-weight: 700; "
+                f"font-size: 12px; border-radius: 3px; padding: 2px 6px;"
             )
-            header.addWidget(tag)
+        elif self.hop.is_stp_root:
+            tag = QLabel(" STP ROOT BRIDGE ")
+            tag.setStyleSheet(
+                f"background-color: #064e3b; color: {OK}; font-weight: 700; "
+                f"font-size: 12px; border-radius: 3px; padding: 2px 6px;"
+            )
         elif self.hop.status in ("timeout", "unreachable"):
             tag = QLabel(f" {self.hop.status.upper()} ")
             tag.setStyleSheet(
                 f"background-color: #450a0a; color: {DANGER}; font-weight: 700; "
-                f"font-size: 10px; border-radius: 3px; padding: 2px 4px;"
+                f"font-size: 12px; border-radius: 3px; padding: 2px 6px;"
             )
+
+        if tag is not None:
             header.addWidget(tag)
 
-        if self.hop.wan_interface and not self.hop.is_stp_root:
-            up_lbl = QLabel(f"WAN: {self.hop.wan_interface.port_name}")
-            up_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
-            header.addWidget(up_lbl)
-        elif self.hop.uplink_port and not self.hop.is_stp_root:
-            prefix = "Root Port" if self.hop.uplink_port.is_root_port else "Uplink"
-            up_lbl = QLabel(f"{prefix}: {self.hop.uplink_port.port_name}")
-            up_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
-            header.addWidget(up_lbl)
+        # Uplink arrow "→ next-hop name" (readable at 13px, dim arrow)
+        next_name: str | None = None
+        if self.hop.wan_interface or self.hop.isp_gateway:
+            next_name = f"Internet ({self.hop.isp_gateway})" if self.hop.isp_gateway else "Internet"
+        elif self.hop.uplink_port:
+            u = self.hop.uplink_port
+            if u.neighbor_name:
+                next_name = u.neighbor_name
+            elif u.neighbor_ip:
+                next_name = u.neighbor_ip
+            elif self.hop.default_gateway:
+                next_name = self.hop.default_gateway
+            else:
+                next_name = u.port_name or (f"Port {u.port_id}" if u.port_id is not None else "")
+
+        if next_name and not self.hop.is_stp_root and self.hop.status != "no_upstream":
+            arrow_lbl = QLabel(f"<span style='color:{FG_DIM};'>→</span>  <span style='color:{FG}; font-weight:500;'>{next_name}</span>")
+            arrow_lbl.setStyleSheet("font-size: 13px;")
+            header.addWidget(arrow_lbl)
 
         header.addStretch(1)
 
-        if self.hop.response_time_ms is not None:
-            lat = QLabel(f"{self.hop.response_time_ms:.1f} ms")
-            lat.setStyleSheet(f"color: {FG_FAINT}; font-size: 11px; font-family: {MONO};")
-            header.addWidget(lat)
-
-        self.toggle_btn = QPushButton("Hide" if self.expanded else "Show")
+        # Details toggle button
+        self.toggle_btn = QPushButton("Hide details" if self.expanded else "Details")
         self.toggle_btn.setObjectName("tool")
-        self.toggle_btn.setFixedWidth(50)
+        self.toggle_btn.setStyleSheet(f"font-size: 12px; padding: 3px 10px; color: {FG_DIM};")
+        self.toggle_btn.setMinimumWidth(85)
         self.toggle_btn.clicked.connect(self._toggle_expand)
         header.addWidget(self.toggle_btn)
 
         main_layout.addLayout(header)
 
-        # Body Container
+        # Ambiguous candidate continuation buttons (prominent when present)
+        candidates = list(self.hop.ambiguous_candidates)
+        if not candidates and self.hop.status in ("ambiguous", "root_claimed_but_uplinks_present"):
+            candidates = [
+                p for p in self.hop.ports
+                if not p.is_downlink and (p.neighbor_name or p.neighbor_port or p.neighbor_chassis or p.neighbor_ip)
+            ]
+
+        if self.hop.status in ("ambiguous", "root_claimed_but_uplinks_present") and candidates:
+            cand_frame = QFrame()
+            cand_frame.setObjectName("ambiguous_candidates")
+            cand_frame.setStyleSheet(
+                f"QFrame#ambiguous_candidates {{ background-color: {BG_INPUT}; border: 1px solid {WARN}; "
+                f"border-radius: 4px; padding: 6px 10px; }}"
+            )
+            cand_layout = QVBoxLayout(cand_frame)
+            cand_layout.setContentsMargins(8, 6, 8, 6)
+            cand_layout.setSpacing(6)
+
+            if self.hop.status == "root_claimed_but_uplinks_present":
+                cand_title = QLabel("Switch reports STP root, but upstream mesh/LLDP candidate(s) detected — choose a path to continue:")
+            elif len(candidates) == 1:
+                cand_title = QLabel("Upstream candidate found without management IP — choose path to resolve and continue:")
+            else:
+                cand_title = QLabel("Multiple upstream candidates found — choose a path to continue discovery:")
+            cand_title.setStyleSheet(f"color: {WARN}; font-weight: 600; font-size: 12px;")
+            cand_layout.addWidget(cand_title)
+
+            btn_row = QHBoxLayout()
+            btn_row.setSpacing(8)
+
+            for cand in candidates:
+                cand_name = cand.neighbor_name or cand.neighbor_chassis or "Neighbor"
+                cand_ip = cand.neighbor_ip or ""
+                cand_port = cand.port_name or (f"Port {cand.port_id}" if cand.port_id is not None else "")
+                if cand_ip:
+                    port_suffix = f" on {cand_port}" if cand_port else ""
+                    btn_text = f"▶ Try {cand_name} ({cand_ip}){port_suffix}"
+                else:
+                    port_suffix = f" (on {cand_port})" if cand_port else ""
+                    btn_text = f"▶ Try {cand_name}{port_suffix}"
+                cand_btn = QPushButton(btn_text)
+                btn_id = cand_ip or str(cand.port_id)
+                cand_btn.setObjectName(f"candidate_btn_{btn_id}")
+                cand_btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {BG_PANEL}; border: 1px solid {BORDER_STRONG}; "
+                    f"color: {ACCENT}; font-size: 12px; font-weight: 600; "
+                    f"padding: 5px 12px; border-radius: 4px; text-align: left; }} "
+                    f"QPushButton:hover {{ background-color: #1e3a5f; color: #ffffff; border-color: {ACCENT}; }}"
+                )
+                cand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                cand_btn.clicked.connect(
+                    lambda checked=False, c=cand: self.continue_from.emit({
+                        "candidate": c,
+                        "hop_mgmt_ip": self.hop.mgmt_ip,
+                        "hop_ip": self.hop.mgmt_ip,
+                        "port_id": c.port_id,
+                    })
+                )
+                btn_row.addWidget(cand_btn)
+
+            btn_row.addStretch(1)
+            cand_layout.addLayout(btn_row)
+            main_layout.addWidget(cand_frame)
+
+        # Body Container (Expanded Details — collapsed by default)
         self.body = QWidget()
+        self.body.setVisible(self.expanded)
         body_layout = QVBoxLayout(self.body)
         body_layout.setContentsMargins(0, 4, 0, 0)
         body_layout.setSpacing(6)
 
-        # Info line (platform / sys_descr)
+        # Info line (platform / sys_descr + latency moved into details)
+        info_layout = QHBoxLayout()
+        info_layout.setContentsMargins(0, 0, 0, 0)
         if self.hop.sys_descr or self.hop.platform:
             desc_text = self.hop.platform or self.hop.sys_descr
             desc_lbl = QLabel(f"System: {desc_text}")
             desc_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
             desc_lbl.setWordWrap(True)
-            body_layout.addWidget(desc_lbl)
+            info_layout.addWidget(desc_lbl, stretch=1)
+        if self.hop.response_time_ms is not None:
+            lat_lbl = QLabel(f"Latency: {self.hop.response_time_ms:.1f} ms")
+            lat_lbl.setStyleSheet(f"color: {FG_FAINT}; font-size: 11px; font-family: {MONO};")
+            info_layout.addWidget(lat_lbl)
+        if info_layout.count() > 0:
+            body_layout.addLayout(info_layout)
 
         # Determine path ports: downlink, uplink
         downlink = self.hop.downlink_port or self.hop.lan_interface
@@ -432,70 +511,6 @@ class HopCardWidget(QFrame):
             err_lbl.setStyleSheet(f"color: {DANGER}; font-size: 11px;")
             body_layout.addWidget(err_lbl)
 
-        # Ambiguous candidate continuation buttons
-        candidates = list(self.hop.ambiguous_candidates)
-        if not candidates and self.hop.status in ("ambiguous", "root_claimed_but_uplinks_present"):
-            candidates = [
-                p for p in self.hop.ports
-                if not p.is_downlink and (p.neighbor_name or p.neighbor_port or p.neighbor_chassis or p.neighbor_ip)
-            ]
-
-        if self.hop.status in ("ambiguous", "root_claimed_but_uplinks_present") and candidates:
-            cand_frame = QFrame()
-            cand_frame.setObjectName("ambiguous_candidates")
-            cand_frame.setStyleSheet(
-                f"QFrame#ambiguous_candidates {{ background-color: {BG_INPUT}; border: 1px solid {WARN}; "
-                f"border-radius: 4px; padding: 6px 10px; }}"
-            )
-            cand_layout = QVBoxLayout(cand_frame)
-            cand_layout.setContentsMargins(8, 6, 8, 6)
-            cand_layout.setSpacing(6)
-
-            if self.hop.status == "root_claimed_but_uplinks_present":
-                cand_title = QLabel("Switch reports STP root, but upstream mesh/LLDP candidate(s) detected — choose a path to continue:")
-            elif len(candidates) == 1:
-                cand_title = QLabel("Upstream candidate found without management IP — choose path to resolve and continue:")
-            else:
-                cand_title = QLabel("Multiple upstream candidates found — choose a path to continue discovery:")
-            cand_title.setStyleSheet(f"color: {WARN}; font-weight: 600; font-size: 11px;")
-            cand_layout.addWidget(cand_title)
-
-            btn_row = QHBoxLayout()
-            btn_row.setSpacing(8)
-
-            for cand in candidates:
-                cand_name = cand.neighbor_name or cand.neighbor_chassis or "Neighbor"
-                cand_ip = cand.neighbor_ip or ""
-                cand_port = cand.port_name or (f"Port {cand.port_id}" if cand.port_id is not None else "")
-                if cand_ip:
-                    port_suffix = f" on {cand_port}" if cand_port else ""
-                    btn_text = f"▶ Try {cand_name} ({cand_ip}){port_suffix}"
-                else:
-                    port_suffix = f" (on {cand_port})" if cand_port else ""
-                    btn_text = f"▶ Try {cand_name}{port_suffix}"
-                cand_btn = QPushButton(btn_text)
-                btn_id = cand_ip or str(cand.port_id)
-                cand_btn.setObjectName(f"candidate_btn_{btn_id}")
-                cand_btn.setStyleSheet(
-                    f"QPushButton {{ background-color: {BG_PANEL}; border: 1px solid {BORDER_STRONG}; "
-                    f"color: {ACCENT}; font-size: 11px; font-weight: 600; font-family: {MONO}; "
-                    f"padding: 4px 10px; border-radius: 4px; text-align: left; }} "
-                    f"QPushButton:hover {{ background-color: #1e3a5f; color: #ffffff; border-color: {ACCENT}; }}"
-                )
-                cand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                cand_btn.clicked.connect(
-                    lambda checked=False, c=cand: self.continue_from.emit({
-                        "candidate": c,
-                        "hop_mgmt_ip": self.hop.mgmt_ip,
-                        "hop_ip": self.hop.mgmt_ip,
-                        "port_id": c.port_id,
-                    })
-                )
-                btn_row.addWidget(cand_btn)
-
-            btn_row.addStretch(1)
-            cand_layout.addLayout(btn_row)
-            body_layout.addWidget(cand_frame)
 
         # Per-port diagnostics table (collapsed by default behind "All N ports" toggle)
         if self.hop.ports:
@@ -652,7 +667,7 @@ class HopCardWidget(QFrame):
     def _toggle_expand(self):
         self.expanded = not self.expanded
         self.body.setVisible(self.expanded)
-        self.toggle_btn.setText("Hide" if self.expanded else "Show")
+        self.toggle_btn.setText("Hide details" if self.expanded else "Details")
 
     def _toggle_ports(self):
         self.ports_expanded = not self.ports_expanded
@@ -672,6 +687,7 @@ class UpstreamWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setMinimumHeight(200)
         self.group = QGroupBox("Upstream Discovery — Path to Edge")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -689,22 +705,24 @@ class UpstreamWidget(QWidget):
         top_bar = QHBoxLayout()
         top_bar.setSpacing(8)
 
-        self.summary_label = QLabel("No upstream path discovered yet.")
-        self.summary_label.setStyleSheet(f"color: {FG_DIM}; font-weight: 500;")
+        self.summary_label = QLabel("Click 'Discover Upstream Path' to walk upstream switches via SNMP.")
+        self.summary_label.setStyleSheet(f"color: {FG_DIM}; font-size: 12px; font-weight: 500;")
         top_bar.addWidget(self.summary_label, stretch=1)
 
         self.refresh_btn = QPushButton("Re-Walk")
         self.refresh_btn.setObjectName("tool")
+        self.refresh_btn.setStyleSheet("font-size: 12px; padding: 3px 10px;")
         self.refresh_btn.clicked.connect(self.refresh_requested.emit)
         top_bar.addWidget(self.refresh_btn)
 
         self.group_layout.addLayout(top_bar)
 
-        # Path Breadcrumb Strip
+        # Path Breadcrumb Strip (Hero element — 14px, sentence style)
         self.breadcrumb_bar = QLabel("")
         self.breadcrumb_bar.setStyleSheet(
-            f"background-color: {BG_INPUT}; color: {FG}; font-family: {MONO}; "
-            f"font-size: 12px; padding: 6px 10px; border: 1px solid {BORDER}; border-radius: 4px;"
+            f"background-color: {BG_INPUT}; color: {FG}; "
+            f"font-size: 14px; padding: 8px 12px; border: 1px solid {BORDER_STRONG}; border-radius: 6px; "
+            f"min-height: 24px;"
         )
         self.breadcrumb_bar.setWordWrap(True)
         self.breadcrumb_bar.hide()
@@ -715,6 +733,8 @@ class UpstreamWidget(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setStyleSheet(f"background-color: {BG_PANEL};")
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         self.cards_container = QWidget()
         self.cards_layout = QVBoxLayout(self.cards_container)
@@ -728,7 +748,7 @@ class UpstreamWidget(QWidget):
     def set_status(self, text: str) -> None:
         """Update discovery status text while in progress."""
         self.summary_label.setText(text)
-        self.summary_label.setStyleSheet(f"color: {ACCENT}; font-weight: 600;")
+        self.summary_label.setStyleSheet(f"color: {ACCENT}; font-weight: 600; font-size: 12px;")
 
     def show_path(self, path: UpstreamPath) -> None:
         """Render the complete upstream discovery path."""
@@ -736,24 +756,56 @@ class UpstreamWidget(QWidget):
 
         if not path.hops:
             self.summary_label.setText("No upstream hops found.")
-            self.summary_label.setStyleSheet(f"color: {FG_FAINT};")
+            self.summary_label.setStyleSheet(f"color: {FG_FAINT}; font-size: 12px;")
             self.breadcrumb_bar.hide()
             return
 
         # Summary text
         self.summary_label.setText(path.edge_summary or f"Walk completed ({len(path.hops)} hops)")
-        self.summary_label.setStyleSheet(f"color: {OK if path.success else WARN}; font-weight: 600;")
+        self.summary_label.setStyleSheet(f"color: {FG_DIM}; font-size: 12px; font-weight: 500;")
 
-        # Breadcrumb trail
-        trail = ["Endpoint"]
+        # Build breadcrumb hero trail: "You (Port 3) → Aruba → UniFi → Eero → Internet"
+        start_node = "You"
+        hop1 = path.hops[0]
+        downlink = hop1.downlink_port or hop1.lan_interface
+        if downlink is None and hop1.hop_index == 1:
+            for p in hop1.ports:
+                if p is not (hop1.uplink_port or hop1.wan_interface) and p.neighbor_name:
+                    if any(k in p.neighbor_name.lower() for k in ("local-host", "endpoint", "host", "localhost")):
+                        downlink = p
+                        break
+        if downlink:
+            d_name = downlink.port_name or (f"Port {downlink.port_id}" if downlink.port_id is not None else "")
+            if d_name:
+                start_node = f"You ({d_name})"
+
+        nodes = [start_node]
         for hop in path.hops:
-            trail.append(f"{hop.hostname or hop.mgmt_ip}")
-        if path.hops and path.hops[-1].isp_gateway:
-            trail.append(f"ISP Gateway ({path.hops[-1].isp_gateway})")
-        elif path.hops and path.hops[-1].default_gateway and not (path.edge_type in ("firewall", "router") and path.hops[-1].device_type in ("firewall", "router")):
-            trail.append(f"Gateway ({path.hops[-1].default_gateway})")
+            nodes.append(f"{hop.hostname or hop.mgmt_ip}")
 
-        self.breadcrumb_bar.setText(" ──▶ ".join(trail))
+        last_hop = path.hops[-1]
+        if last_hop.isp_gateway:
+            nodes.append(f"Internet ({last_hop.isp_gateway})")
+        elif last_hop.default_gateway and not (path.edge_type in ("firewall", "router") and last_hop.device_type in ("firewall", "router")):
+            nodes.append(f"Gateway ({last_hop.default_gateway})")
+
+        # Edge state tag: ONE colored element on that line
+        # green NETWORK EDGE / amber needs-choice / red error
+        if not path.success:
+            if path.edge_type in ("ambiguous", "root_claimed_but_uplinks_present") or last_hop.status in ("ambiguous", "root_claimed_but_uplinks_present"):
+                tag_txt = "AMBIGUOUS · NEEDS CHOICE" if path.edge_type == "ambiguous" else "NEEDS CHOICE"
+                edge_badge = f"<span style='background-color:#422006; color:{WARN}; font-weight:700; font-size:12px; border-radius:3px; padding:2px 8px; margin-left:10px;'>{tag_txt}</span>"
+            else:
+                err_status = (last_hop.status.upper() if last_hop.status in ("timeout", "unreachable") else "ERROR")
+                edge_badge = f"<span style='background-color:#450a0a; color:{DANGER}; font-weight:700; font-size:12px; border-radius:3px; padding:2px 8px; margin-left:10px;'>{err_status}</span>"
+        else:
+            edge_badge = f"<span style='background-color:#064e3b; color:{OK}; font-weight:700; font-size:12px; border-radius:3px; padding:2px 8px; margin-left:10px;'>NETWORK EDGE</span>"
+
+        dim_arrow = f"<span style='color:{FG_DIM};'> → </span>"
+        formatted_nodes = [f"<b style='color:{FG};'>{n}</b>" for n in nodes]
+        breadcrumb_text = dim_arrow.join(formatted_nodes) + f"  {edge_badge}"
+
+        self.breadcrumb_bar.setText(breadcrumb_text)
         self.breadcrumb_bar.show()
 
         # Add Hop Cards
@@ -766,7 +818,7 @@ class UpstreamWidget(QWidget):
         """Reset the widget."""
         self._clear_cards()
         self.summary_label.setText("Click 'Discover Upstream Path' to walk upstream switches via SNMP.")
-        self.summary_label.setStyleSheet(f"color: {FG_FAINT};")
+        self.summary_label.setStyleSheet(f"color: {FG_FAINT}; font-size: 12px;")
         self.breadcrumb_bar.hide()
 
     def _clear_cards(self) -> None:
