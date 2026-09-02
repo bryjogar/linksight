@@ -48,6 +48,9 @@ class UpstreamWorker(QThread):
         forced_next_ip: str | None = None,
         endpoint_ip: str | None = None,
         endpoint_mac: str | None = None,
+        forced_port_id: int | str | None = None,
+        forced_hop_ip: str | None = None,
+        forced_candidate: PortDiagnostics | None = None,
     ):
         super().__init__(parent)
         self.start_ip = start_ip
@@ -57,6 +60,9 @@ class UpstreamWorker(QThread):
         self.forced_next_ip = forced_next_ip
         self.endpoint_ip = endpoint_ip
         self.endpoint_mac = endpoint_mac
+        self.forced_port_id = forced_port_id
+        self.forced_hop_ip = forced_hop_ip
+        self.forced_candidate = forced_candidate
         self._stop_event = threading.Event()
 
     def stop(self) -> None:
@@ -93,7 +99,14 @@ class UpstreamWorker(QThread):
             if self._stop_event.is_set():
                 self.cancelled.emit()
                 return
-            path = get_demo_path(self.start_ip, forced_next_ip=self.forced_next_ip, endpoint_mac=self.endpoint_mac)
+            path = get_demo_path(
+                self.start_ip,
+                forced_next_ip=self.forced_next_ip,
+                endpoint_mac=self.endpoint_mac,
+                forced_port_id=self.forced_port_id,
+                forced_hop_ip=self.forced_hop_ip,
+                forced_candidate=self.forced_candidate,
+            )
             self.finished.emit(path)
         else:
             if self._stop_event.is_set():
@@ -108,6 +121,9 @@ class UpstreamWorker(QThread):
                 forced_next_ip=self.forced_next_ip,
                 endpoint_ip=self.endpoint_ip,
                 endpoint_mac=self.endpoint_mac,
+                forced_port_id=self.forced_port_id,
+                forced_hop_ip=self.forced_hop_ip,
+                forced_candidate=self.forced_candidate,
             )
             if self._stop_event.is_set():
                 self.cancelled.emit()
@@ -543,7 +559,14 @@ class MainWindow(QMainWindow):
         if not ok_launch:
             QMessageBox.warning(self, "LinkSight — SSH", msg)
 
-    def _on_upstream_requested(self, start_ip: str, forced_next_ip: str | None = None) -> None:
+    def _on_upstream_requested(
+        self,
+        start_ip: str,
+        forced_next_ip: str | None = None,
+        forced_port_id: int | str | None = None,
+        forced_hop_ip: str | None = None,
+        forced_candidate: PortDiagnostics | None = None,
+    ) -> None:
         """Trigger an upstream discovery walk starting from start_ip."""
         if not start_ip:
             start_ip = self.switch_widget._current_mgmt_ip
@@ -632,28 +655,60 @@ class MainWindow(QMainWindow):
             forced_next_ip=forced_next_ip,
             endpoint_ip=endpoint_ip,
             endpoint_mac=endpoint_mac,
+            forced_port_id=forced_port_id,
+            forced_hop_ip=forced_hop_ip,
+            forced_candidate=forced_candidate,
         )
         self._upstream_worker.progress.connect(self._on_discovery_progress)
         self._upstream_worker.finished.connect(self._on_discovery_finished)
         self._upstream_worker.cancelled.connect(self._on_discovery_cancelled)
         self._upstream_worker.start()
 
-    def _on_upstream_continue(self, target: str | PortDiagnostics) -> None:
+    def _on_upstream_continue(self, target: Any) -> None:
         start_ip = self._current_walk_ip or self.switch_widget._current_mgmt_ip
         if not start_ip:
             return
 
         candidate: PortDiagnostics | None = None
+        hop_ip: str | None = None
+        port_id: int | str | None = None
         neighbor_ip: str = ""
-        if isinstance(target, PortDiagnostics):
+
+        if isinstance(target, dict):
+            candidate = target.get("candidate")
+            hop_ip = target.get("hop_mgmt_ip") or target.get("hop_ip")
+            port_id = target.get("port_id")
+            if port_id is None and candidate:
+                port_id = candidate.port_id
+            if candidate and candidate.neighbor_ip:
+                neighbor_ip = candidate.neighbor_ip
+        elif isinstance(target, PortDiagnostics):
             candidate = target
+            hop_ip = getattr(target, "_hop_ip", None)
+            port_id = candidate.port_id
             neighbor_ip = candidate.neighbor_ip or ""
+        elif isinstance(target, tuple):
+            if len(target) > 0 and isinstance(target[0], PortDiagnostics):
+                candidate = target[0]
+                port_id = candidate.port_id
+                neighbor_ip = candidate.neighbor_ip or ""
+            if len(target) > 1 and isinstance(target[1], str):
+                hop_ip = target[1]
         elif isinstance(target, str):
             neighbor_ip = target
 
-        # If candidate has an IP, continue as today
+        forced_hop_ip = hop_ip or start_ip
+        forced_port_id = port_id
+
+        # If candidate has an IP, continue with forced port identity
         if neighbor_ip:
-            self._on_upstream_requested(start_ip, forced_next_ip=neighbor_ip)
+            self._on_upstream_requested(
+                start_ip,
+                forced_next_ip=neighbor_ip,
+                forced_port_id=forced_port_id,
+                forced_hop_ip=forced_hop_ip,
+                forced_candidate=candidate,
+            )
             return
 
         # Candidate has NO IP: resolve management IP before walking
@@ -679,7 +734,13 @@ class MainWindow(QMainWindow):
                 resolved_ip = None
 
         if resolved_ip:
-            self._on_upstream_requested(start_ip, forced_next_ip=resolved_ip)
+            self._on_upstream_requested(
+                start_ip,
+                forced_next_ip=resolved_ip,
+                forced_port_id=forced_port_id,
+                forced_hop_ip=forced_hop_ip,
+                forced_candidate=candidate,
+            )
             return
 
         # ARP resolution failed or no chassis MAC: manual IP entry prompt fallback
@@ -699,7 +760,13 @@ class MainWindow(QMainWindow):
             candidate_ip = ip_in.strip()
             try:
                 ipaddress.IPv4Address(candidate_ip)
-                self._on_upstream_requested(start_ip, forced_next_ip=candidate_ip)
+                self._on_upstream_requested(
+                    start_ip,
+                    forced_next_ip=candidate_ip,
+                    forced_port_id=forced_port_id,
+                    forced_hop_ip=forced_hop_ip,
+                    forced_candidate=candidate,
+                )
                 break
             except ValueError:
                 prompt_label = "Invalid IPv4 address. Please enter a valid switch management IPv4:"

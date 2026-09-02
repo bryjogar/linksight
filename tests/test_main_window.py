@@ -239,18 +239,26 @@ def test_main_window_no_ip_candidate_arp_resolve_success(monkeypatch):
         return "192.168.1.88"
 
     monkeypatch.setattr(mw_mod, "resolve_switch_mgmt_ip", mock_resolve)
-    requested_calls = []
-    monkeypatch.setattr(window, "_on_upstream_requested", lambda start_ip, forced_next_ip=None: requested_calls.append((start_ip, forced_next_ip)))
+    monkeypatch.setattr(mw_mod.UpstreamWorker, "start", lambda self: None)
+    window._session_community = "public"
 
     try:
         window._current_walk_ip = "10.0.0.10"
-        window._on_upstream_continue(cand)
+        window._on_upstream_continue({
+            "candidate": cand,
+            "hop_mgmt_ip": "10.0.0.10",
+            "port_id": 47,
+        })
 
         assert len(resolved_calls) == 1
         assert resolved_calls[0].chassis_id == "74:83:c2:11:22:33"
         assert resolved_calls[0].management_ips == []
-        assert len(requested_calls) == 1
-        assert requested_calls[0] == ("10.0.0.10", "192.168.1.88")
+        assert window._upstream_worker is not None
+        assert window._upstream_worker.start_ip == "10.0.0.10"
+        assert window._upstream_worker.forced_next_ip == "192.168.1.88"
+        assert window._upstream_worker.forced_port_id == 47
+        assert window._upstream_worker.forced_hop_ip == "10.0.0.10"
+        assert window._upstream_worker.forced_candidate == cand
     finally:
         window.close()
         controller.close()
@@ -289,7 +297,7 @@ def test_main_window_no_ip_candidate_arp_fails_manual_prompt(monkeypatch):
     monkeypatch.setattr(QInputDialog, "getText", mock_get_text)
 
     requested_calls = []
-    monkeypatch.setattr(window, "_on_upstream_requested", lambda start_ip, forced_next_ip=None: requested_calls.append((start_ip, forced_next_ip)))
+    monkeypatch.setattr(window, "_on_upstream_requested", lambda start_ip, forced_next_ip=None, **kw: requested_calls.append((start_ip, forced_next_ip)))
 
     try:
         window._current_walk_ip = "10.0.0.10"
@@ -328,10 +336,52 @@ def test_main_window_no_ip_candidate_demo_mode():
 
         assert window._upstream_worker is not None
         assert window._upstream_worker.forced_next_ip == "192.168.1.20"
+        assert window._upstream_worker.forced_port_id == 47
+        assert window._upstream_worker.forced_hop_ip == "10.0.0.10"
         window._upstream_worker.wait(3000)
         QCoreApplication.processEvents()
 
         assert len(window.controller.upstream_path.hops) == 3
+        assert window.controller.upstream_path.hops[0].uplink_port.neighbor_ip == "192.168.1.20"
+        assert window.controller.upstream_path.hops[1].hostname == "UniFi-Switch"
+        assert window.controller.upstream_path.hops[2].hostname == "Eero-Mesh"
+    finally:
+        window.close()
+        controller.close()
+
+
+def test_main_window_candidate_button_click_continues_demo():
+    """Verify that clicking the candidate button in the UI in demo mode initiates
+    continuation carrying port 47 and successfully reaches UniFi-Switch.
+    """
+    from linksight.discovery.demo import get_aruba_demo_path
+    from PySide6.QtWidgets import QPushButton
+
+    app = QApplication.instance() or QApplication([])
+    controller = AppController()
+    window = MainWindow(controller, demo=True)
+
+    try:
+        path = get_aruba_demo_path()
+        window._current_walk_ip = "10.0.0.10"
+        window.upstream_widget.show_path(path)
+
+        cand_btn_47 = window.upstream_widget.findChild(QPushButton, "candidate_btn_47")
+        assert cand_btn_47 is not None
+        assert "▶ Try UniFi-Switch (on Port 47)" in cand_btn_47.text()
+
+        cand_btn_47.click()
+
+        assert window._upstream_worker is not None
+        assert window._upstream_worker.forced_next_ip == "192.168.1.20"
+        assert window._upstream_worker.forced_port_id == 47
+        assert window._upstream_worker.forced_hop_ip == "10.0.0.10"
+
+        window._upstream_worker.wait(3000)
+        QCoreApplication.processEvents()
+
+        assert len(window.controller.upstream_path.hops) == 3
+        assert window.controller.upstream_path.hops[0].uplink_port.port_id == 47
         assert window.controller.upstream_path.hops[0].uplink_port.neighbor_ip == "192.168.1.20"
         assert window.controller.upstream_path.hops[1].hostname == "UniFi-Switch"
         assert window.controller.upstream_path.hops[2].hostname == "Eero-Mesh"

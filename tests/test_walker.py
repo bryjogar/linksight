@@ -1290,6 +1290,191 @@ def test_walker_single_no_ip_candidate_not_autofollowed_surfaces_actionable():
     assert "upstream candidate neighbor found without management IP" in result.edge_summary
 
 
+def test_walker_forced_port_identity_resolves_multiple_no_ip_candidates():
+    """THE regression test: a switch with TWO no-IP LLDP candidates (UniFi on port 47
+    and Mesh AP on port 24). When walk is invoked with forced_next_ip AND forced_port_id=47,
+    the walker selects port 47 as uplink directly (not port 24), assigns the resolved IP,
+    and continues discovery to hop 2 = UniFi-Switch.
+    """
+    from linksight.discovery.demo import ARUBA_DEMO_MIB
+
+    sw_ip = "10.0.0.10"
+    unifi_ip = "192.168.1.20"
+
+    # Aruba-like MIB with TWO no-IP LLDP candidates (port 24 and port 47)
+    aruba_two_no_ip_mib = {
+        **ARUBA_DEMO_MIB,
+        # Port 24: Mesh-AP without management IP
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+        f"{OID_IF_NAME}.24": "Port 24",
+        f"{OID_IF_HIGH_SPEED}.24": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
+        f"{OID_DOT1Q_PVID}.24": 1,
+        f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Mesh-AP-Backhaul",
+        f"{OID_LLDP_REM_PORT_ID}.0.24.1": "eth0",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.24.1": bytes.fromhex("000b86998877"),
+        # Note: NO OID_LLDP_REM_MAN_ADDR_TABLE for port 24!
+        # Port 47: UniFi-Switch without management IP
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.47": 47,
+        f"{OID_IF_NAME}.47": "Port 47",
+        f"{OID_IF_HIGH_SPEED}.47": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.47": 5,
+        f"{OID_DOT1Q_PVID}.47": 1,
+        f"{OID_LLDP_REM_SYS_NAME}.0.47.1": "UniFi-Switch",
+        f"{OID_LLDP_REM_PORT_ID}.0.47.1": "Port 1",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.47.1": bytes.fromhex("7483c2112233"),
+        # Note: NO OID_LLDP_REM_MAN_ADDR_TABLE for port 47!
+        # No ARP entries for unifi_ip on this switch
+    }
+
+    unifi_mib = {
+        OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        OID_SYS_NAME: "UniFi-Switch",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("7483c2112233"),
+    }
+
+    device_mibs = {sw_ip: aruba_two_no_ip_mib, unifi_ip: unifi_mib}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(
+        start_ip=sw_ip,
+        endpoint_mac="00:11:22:33:44:55",
+        forced_next_ip=unifi_ip,
+        forced_port_id=47,
+        forced_hop_ip=sw_ip,
+    )
+
+    assert result.success is True
+    assert len(result.hops) == 2
+    # Hop 1 (Aruba): uplink selected directly by port_id 47
+    hop1 = result.hops[0]
+    assert hop1.status == "ok"
+    assert hop1.uplink_port is not None
+    assert hop1.uplink_port.port_id == 47
+    assert hop1.uplink_port.neighbor_name == "UniFi-Switch"
+    assert hop1.uplink_port.neighbor_ip == unifi_ip
+
+    # Hop 2 (UniFi): reached and discovered
+    hop2 = result.hops[1]
+    assert hop2.mgmt_ip == unifi_ip
+    assert hop2.hostname == "UniFi-Switch"
+
+
+def test_walker_no_port_identity_re_stops_on_multiple_no_ip_candidates():
+    """Verify that without port identity (old behavior: only forced_next_ip),
+    when a switch has TWO no-IP candidates, IP/ARP/single-candidate matching fails,
+    uplink_port_diag stays None, and the walk re-stops at hop 1 without reaching hop 2.
+    """
+    from linksight.discovery.demo import ARUBA_DEMO_MIB
+
+    sw_ip = "10.0.0.10"
+    unifi_ip = "192.168.1.20"
+
+    aruba_two_no_ip_mib = {
+        **ARUBA_DEMO_MIB,
+        # Port 24: Mesh-AP without management IP
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+        f"{OID_IF_NAME}.24": "Port 24",
+        f"{OID_IF_HIGH_SPEED}.24": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
+        f"{OID_DOT1Q_PVID}.24": 1,
+        f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Mesh-AP-Backhaul",
+        f"{OID_LLDP_REM_PORT_ID}.0.24.1": "eth0",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.24.1": bytes.fromhex("000b86998877"),
+        # Port 47: UniFi-Switch without management IP
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.47": 47,
+        f"{OID_IF_NAME}.47": "Port 47",
+        f"{OID_IF_HIGH_SPEED}.47": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.47": 5,
+        f"{OID_DOT1Q_PVID}.47": 1,
+        f"{OID_LLDP_REM_SYS_NAME}.0.47.1": "UniFi-Switch",
+        f"{OID_LLDP_REM_PORT_ID}.0.47.1": "Port 1",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.47.1": bytes.fromhex("7483c2112233"),
+    }
+
+    unifi_mib = {
+        OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        OID_SYS_NAME: "UniFi-Switch",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("7483c2112233"),
+    }
+
+    device_mibs = {sw_ip: aruba_two_no_ip_mib, unifi_ip: unifi_mib}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    # Invoked WITHOUT forced_port_id (old invocation shape)
+    result = walker.walk(
+        start_ip=sw_ip,
+        endpoint_mac="00:11:22:33:44:55",
+        forced_next_ip=unifi_ip,
+    )
+
+    # Re-stops at hop 1 because there are 2 no-IP candidates and switch has no ARP entry
+    assert result.success is False
+    assert len(result.hops) == 1
+    assert result.hops[0].status == "root_claimed_but_uplinks_present"
+    assert result.hops[0].uplink_port is None
+    assert len(result.hops[0].ambiguous_candidates) == 2
+
+
+def test_walker_forced_port_identity_ambiguous_two_no_ip_candidates():
+    """Verify that on an ambiguous switch (no STP) with TWO no-IP candidates,
+    passing forced_port_id deterministically sets the uplink and continues to hop 2.
+    """
+    from linksight.discovery.demo import ARUBA_DEMO_MIB
+
+    sw_ip = "10.0.0.10"
+    unifi_ip = "192.168.1.20"
+
+    # Ambiguous switch: remove STP MIB entries
+    ambiguous_mib = {
+        k: v for k, v in ARUBA_DEMO_MIB.items()
+        if not k.startswith("1.3.6.1.2.1.17.2.") and k != OID_DOT1D_BASE_BRIDGE_ADDRESS
+    }
+    ambiguous_mib.update({
+        # Port 24: Mesh-AP without IP
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+        f"{OID_IF_NAME}.24": "Port 24",
+        f"{OID_IF_HIGH_SPEED}.24": 1000,
+        f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Mesh-AP-Backhaul",
+        f"{OID_LLDP_REM_PORT_ID}.0.24.1": "eth0",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.24.1": bytes.fromhex("000b86998877"),
+        # Port 47: UniFi-Switch without IP
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.47": 47,
+        f"{OID_IF_NAME}.47": "Port 47",
+        f"{OID_IF_HIGH_SPEED}.47": 1000,
+        f"{OID_LLDP_REM_SYS_NAME}.0.47.1": "UniFi-Switch",
+        f"{OID_LLDP_REM_PORT_ID}.0.47.1": "Port 1",
+        f"{OID_LLDP_REM_CHASSIS_ID}.0.47.1": bytes.fromhex("7483c2112233"),
+    })
+
+    unifi_mib = {
+        OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        OID_SYS_NAME: "UniFi-Switch",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("7483c2112233"),
+    }
+
+    device_mibs = {sw_ip: ambiguous_mib, unifi_ip: unifi_mib}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(
+        start_ip=sw_ip,
+        endpoint_mac="00:11:22:33:44:55",
+        forced_next_ip=unifi_ip,
+        forced_port_id=47,
+    )
+
+    assert result.success is True
+    assert len(result.hops) == 2
+    assert result.hops[0].status == "ok"
+    assert result.hops[0].uplink_port is not None
+    assert result.hops[0].uplink_port.port_id == 47
+    assert result.hops[0].uplink_port.neighbor_ip == unifi_ip
+    assert result.hops[1].mgmt_ip == unifi_ip
+
+
 # =============================================================================
 # VENDOR-CLASS WALK MATRIX (Deliverable 3)
 # Guardrail tests verifying graceful termination, no exceptions, and coherent

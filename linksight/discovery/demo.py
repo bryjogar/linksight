@@ -934,9 +934,16 @@ def get_aruba_demo_path(
     start_ip: str = "10.0.0.10",
     forced_next_ip: str | None = None,
     endpoint_mac: str | None = None,
+    forced_port_id: int | str | None = None,
+    forced_hop_ip: str | None = None,
+    forced_candidate: PortDiagnostics | None = None,
 ) -> UpstreamPath:
     """Return a canned demo upstream path for an Aruba switch with a mesh backhaul uplink."""
-    if forced_next_ip == "192.168.1.20":
+    if (
+        forced_next_ip == "192.168.1.20"
+        or (forced_port_id in (47, "47") and (not forced_hop_ip or forced_hop_ip == start_ip))
+        or (forced_candidate and (forced_candidate.port_id in (47, "47") or forced_candidate.neighbor_name == "UniFi-Switch"))
+    ):
         hop1_continued = Hop(
             hop_index=1,
             hostname="Aruba-2930F",
@@ -1098,7 +1105,11 @@ def get_aruba_demo_path(
             success=True,
         )
 
-    if forced_next_ip == "10.0.0.1":
+    if (
+        forced_next_ip == "10.0.0.1"
+        or (forced_port_id in (24, "24") and (not forced_hop_ip or forced_hop_ip == start_ip))
+        or (forced_candidate and (forced_candidate.port_id in (24, "24") or forced_candidate.neighbor_name == "Mesh-AP-Backhaul"))
+    ):
         hop1_continued = Hop(
             hop_index=1,
             hostname="Aruba-2930F",
@@ -1187,12 +1198,22 @@ def get_demo_path(
     start_ip: str = "10.0.0.3",
     forced_next_ip: str | None = None,
     endpoint_mac: str | None = None,
+    forced_port_id: int | str | None = None,
+    forced_hop_ip: str | None = None,
+    forced_candidate: PortDiagnostics | None = None,
 ) -> UpstreamPath:
     """Return a canned demo upstream path."""
     if start_ip == "10.0.0.10":
-        return get_aruba_demo_path(start_ip=start_ip, forced_next_ip=forced_next_ip, endpoint_mac=endpoint_mac)
+        return get_aruba_demo_path(
+            start_ip=start_ip,
+            forced_next_ip=forced_next_ip,
+            endpoint_mac=endpoint_mac,
+            forced_port_id=forced_port_id,
+            forced_hop_ip=forced_hop_ip,
+            forced_candidate=forced_candidate,
+        )
     if start_ip == "192.168.1.20":
-        variant = "ambiguous" if not forced_next_ip else "with_upstream"
+        variant = "ambiguous" if not (forced_next_ip or forced_port_id) else "with_upstream"
         return get_unifi_demo_path(variant=variant, start_ip=start_ip, forced_next_ip=forced_next_ip)
     return UpstreamPath(
         start_ip=start_ip,

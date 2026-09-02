@@ -699,13 +699,19 @@ def test_hop_card_widget_ambiguous_candidate_buttons():
     assert "▶ Try Aruba-2930F (10.0.0.10) on Port 15" in cand_btns[0].text()
     assert "▶ Try U6-Pro-AP (192.168.1.50) on Port 16" in cand_btns[1].text()
 
-    # Click candidate 1 -> emits 10.0.0.10
+    # Click candidate 1 -> emits structured payload for candidate 1
     cand_btns[0].click()
-    assert emitted == ["10.0.0.10"]
+    assert len(emitted) == 1
+    assert emitted[0]["candidate"] == cand1
+    assert emitted[0]["hop_mgmt_ip"] == "192.168.1.20"
+    assert emitted[0]["port_id"] == 15
 
-    # Click candidate 2 -> emits 192.168.1.50
+    # Click candidate 2 -> emits structured payload for candidate 2
     cand_btns[1].click()
-    assert emitted == ["10.0.0.10", "192.168.1.50"]
+    assert len(emitted) == 2
+    assert emitted[1]["candidate"] == cand2
+    assert emitted[1]["hop_mgmt_ip"] == "192.168.1.20"
+    assert emitted[1]["port_id"] == 16
 
     widget.close()
 
@@ -890,9 +896,12 @@ def test_upstream_widget_render_aruba_mesh_candidate():
     assert cand_btn_47 is not None
     assert "▶ Try UniFi-Switch (on Port 47)" in cand_btn_47.text()
 
-    # Clicking button emits signal
+    # Clicking button emits signal with structured payload
     cand_btn.click()
-    assert emitted == ["10.0.0.1"]
+    assert len(emitted) == 1
+    assert emitted[0]["hop_mgmt_ip"] == "10.0.0.10"
+    assert emitted[0]["port_id"] == 24
+    assert emitted[0]["candidate"].neighbor_ip == "10.0.0.1"
 
     widget.close()
 
@@ -944,13 +953,17 @@ def test_candidate_button_renders_no_ip_label_format():
     assert "▶ Try UniFi-Switch (on Port 47)" in cand_btns[0].text()
     assert "▶ Try 00:11:22:33:44:55 (on Port 12)" in cand_btns[1].text()
 
-    # Clicking candidate without IP emits the candidate PortDiagnostics object
+    # Clicking candidate without IP emits the candidate structured payload
     cand_btns[0].click()
     assert len(emitted) == 1
-    assert isinstance(emitted[0], PortDiagnostics)
-    assert emitted[0].port_id == 47
-    assert emitted[0].neighbor_name == "UniFi-Switch"
-    assert emitted[0].neighbor_chassis == "74:83:c2:11:22:33"
+    assert isinstance(emitted[0], dict)
+    assert emitted[0]["port_id"] == 47
+    assert emitted[0]["hop_mgmt_ip"] == "10.0.0.10"
+    cand_diag = emitted[0]["candidate"]
+    assert isinstance(cand_diag, PortDiagnostics)
+    assert cand_diag.port_id == 47
+    assert cand_diag.neighbor_name == "UniFi-Switch"
+    assert cand_diag.neighbor_chassis == "74:83:c2:11:22:33"
 
     widget.close()
 

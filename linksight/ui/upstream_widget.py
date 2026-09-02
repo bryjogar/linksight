@@ -483,7 +483,14 @@ class HopCardWidget(QFrame):
                     f"QPushButton:hover {{ background-color: #1e3a5f; color: #ffffff; border-color: {ACCENT}; }}"
                 )
                 cand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                cand_btn.clicked.connect(lambda checked=False, c=cand: self.continue_from.emit(c.neighbor_ip if c.neighbor_ip else c))
+                cand_btn.clicked.connect(
+                    lambda checked=False, c=cand: self.continue_from.emit({
+                        "candidate": c,
+                        "hop_mgmt_ip": self.hop.mgmt_ip,
+                        "hop_ip": self.hop.mgmt_ip,
+                        "port_id": c.port_id,
+                    })
+                )
                 btn_row.addWidget(cand_btn)
 
             btn_row.addStretch(1)
