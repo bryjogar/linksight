@@ -74,7 +74,7 @@ class Hop:
     stp_bridge_id: str = ""
     stp_root_port_num: int | None = None
     default_gateway: str | None = None
-    status: str = "ok"  # "ok", "timeout", "unreachable", "auth_failed", "root_reached", "router_reached", "no_upstream", "ambiguous"
+    status: str = "ok"  # "ok", "timeout", "unreachable", "auth_failed", "root_reached", "router_reached", "no_upstream", "ambiguous", "root_claimed_but_uplinks_present"
     error_message: str | None = None
     ports: list[PortDiagnostics] = field(default_factory=list)
     uplink_port: PortDiagnostics | None = None
@@ -95,7 +95,7 @@ class UpstreamPath:
 
     start_ip: str = ""
     hops: list[Hop] = field(default_factory=list)
-    edge_type: str = "unknown"  # "stp_root", "router", "firewall", "gateway", "timeout", "unreachable", "no_upstream", "ambiguous"
+    edge_type: str = "unknown"  # "stp_root", "router", "firewall", "gateway", "timeout", "unreachable", "no_upstream", "ambiguous", "root_claimed_but_uplinks_present"
     edge_summary: str = ""
     completed_at: str = field(default_factory=_now)
     success: bool = True

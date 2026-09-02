@@ -838,3 +838,57 @@ def test_upstream_widget_pvid_missing_untagged_fallback():
     widget.close()
 
 
+def test_upstream_widget_render_aruba_mesh_candidate():
+    """Verify that Aruba claimed root with mesh candidate renders warning tag,
+    candidate prompt, and interactive continuation button emitting candidate IP.
+    """
+    from PySide6.QtWidgets import QFrame, QLabel, QPushButton
+    from linksight.discovery.demo import get_aruba_demo_path
+
+    app = QApplication.instance() or QApplication([])
+    widget = UpstreamWidget()
+    widget.show()
+
+    emitted: list[str] = []
+    widget.continue_from.connect(lambda ip: emitted.append(ip))
+
+    path = get_aruba_demo_path()
+    widget.show_path(path)
+
+    cards: list[HopCardWidget] = [
+        widget.cards_layout.itemAt(i).widget()
+        for i in range(widget.cards_layout.count())
+        if isinstance(widget.cards_layout.itemAt(i).widget(), HopCardWidget)
+    ]
+    assert len(cards) == 1
+    aruba_card = cards[0]
+
+    # Verify status tag on card
+    card_labels = [lbl.text() for lbl in aruba_card.findChildren(QLabel)]
+    assert any("CLAIMED ROOT · MESH UPLINK" in t for t in card_labels)
+
+    # Verify path summary has Port 3
+    summary_frame = aruba_card.findChild(QFrame, "path_summary")
+    assert summary_frame is not None
+    summary_text = " ".join(lbl.text() for lbl in summary_frame.findChildren(QLabel))
+    assert "Port 3" in summary_text
+    assert "Claimed Root — Mesh Uplink" in summary_text
+
+    # Verify candidate box
+    cand_frame = aruba_card.findChild(QFrame, "ambiguous_candidates")
+    assert cand_frame is not None
+    cand_labels = [lbl.text() for lbl in cand_frame.findChildren(QLabel)]
+    assert any("Switch reports STP root, but upstream mesh/LLDP candidate(s) detected" in t for t in cand_labels)
+
+    # Verify candidate button
+    cand_btn = aruba_card.findChild(QPushButton, "candidate_btn_10.0.0.1")
+    assert cand_btn is not None
+    assert "▶ Try Mesh-AP-Backhaul (10.0.0.1) on Port 24" in cand_btn.text()
+
+    # Clicking button emits signal
+    cand_btn.click()
+    assert emitted == ["10.0.0.1"]
+
+    widget.close()
+
+

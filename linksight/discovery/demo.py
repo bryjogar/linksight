@@ -22,6 +22,7 @@ from .walker import (
     OID_DOT1D_STP_ROOT_PORT,
     OID_DOT1D_BASE_PORT_IFINDEX,
     OID_DOT1D_STP_PORT_STATE,
+    OID_DOT1D_TP_FDB_PORT,
     OID_DOT1Q_PVID,
     OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS,
     OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS,
@@ -360,6 +361,8 @@ ARUBA_DEMO_MIB: dict[str, any] = {
     f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.1": bytes([0x20]),
     f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.30": bytes([0x20]),
     f"{OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS}.0.1": bytes([0x20]),
+    # FDB entry: bridge port 3 learned MAC 00:11:22:33:44:55
+    f"{OID_DOT1D_TP_FDB_PORT}.0.17.34.51.68.85": 3,
     OID_IP_ROUTE_NEXT_HOP_DEFAULT: "10.0.0.1",
 }
 
@@ -380,7 +383,21 @@ ARUBA_DEMO_MIB_CURRENT_ONLY: dict[str, any] = {
     f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.1": bytes([0x20]),
     f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.30": bytes([0x20]),
     f"{OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS}.0.1": bytes([0x20]),
+    f"{OID_DOT1D_TP_FDB_PORT}.0.17.34.51.68.85": 3,
     OID_IP_ROUTE_NEXT_HOP_DEFAULT: "10.0.0.1",
+}
+
+# Aruba switch MIB fixture with Mesh Uplink Candidate on Port 24
+ARUBA_MESH_DEMO_MIB: dict[str, any] = {
+    **ARUBA_DEMO_MIB,
+    f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+    f"{OID_IF_NAME}.24": "Port 24",
+    f"{OID_IF_HIGH_SPEED}.24": 1000,
+    f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
+    f"{OID_DOT1Q_PVID}.24": 1,
+    f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Mesh-AP-Backhaul",
+    f"{OID_LLDP_REM_PORT_ID}.0.24.1": "eth0",
+    f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.24.1.1.4.10.0.0.1": 1,
 }
 
 UNIFI_DEMO_HOPS_WITH_UPSTREAM: list[Hop] = [
@@ -812,7 +829,7 @@ ARUBA_DEMO_HOPS: list[Hop] = [
         stp_root_bridge_id="32768 / 00:0b:86:11:22:33",
         stp_bridge_id="32768 / 00:0b:86:11:22:33",
         default_gateway="10.0.0.1",
-        status="root_reached",
+        status="root_claimed_but_uplinks_present",
         response_time_ms=2.8,
         ports=[
             PortDiagnostics(
@@ -827,6 +844,19 @@ ARUBA_DEMO_HOPS: list[Hop] = [
                 is_downlink=True,
                 neighbor_name="Local-Host",
                 neighbor_ip="10.0.0.42",
+                neighbor_port="eth0",
+            ),
+            PortDiagnostics(
+                port_id=24,
+                port_name="Port 24",
+                pvid=1,
+                allowed_vlans=[1, 30],
+                tagged_vlans=[30],
+                untagged_vlans=[1],
+                stp_state="forwarding",
+                link_speed_mbps=1000,
+                neighbor_name="Mesh-AP-Backhaul",
+                neighbor_ip="10.0.0.1",
                 neighbor_port="eth0",
             ),
         ],
@@ -844,25 +874,124 @@ ARUBA_DEMO_HOPS: list[Hop] = [
             neighbor_ip="10.0.0.42",
             neighbor_port="eth0",
         ),
+        ambiguous_candidates=[
+            PortDiagnostics(
+                port_id=24,
+                port_name="Port 24",
+                pvid=1,
+                allowed_vlans=[1, 30],
+                tagged_vlans=[30],
+                untagged_vlans=[1],
+                stp_state="forwarding",
+                link_speed_mbps=1000,
+                neighbor_name="Mesh-AP-Backhaul",
+                neighbor_ip="10.0.0.1",
+                neighbor_port="eth0",
+            ),
+        ],
     ),
 ]
 
 
-def get_aruba_demo_path(start_ip: str = "10.0.0.10") -> UpstreamPath:
-    """Return a canned demo upstream path for an Aruba switch."""
+def get_aruba_demo_path(
+    start_ip: str = "10.0.0.10",
+    forced_next_ip: str | None = None,
+    endpoint_mac: str | None = None,
+) -> UpstreamPath:
+    """Return a canned demo upstream path for an Aruba switch with a mesh backhaul uplink."""
+    if forced_next_ip == "10.0.0.1":
+        hop1_continued = Hop(
+            hop_index=1,
+            hostname="Aruba-2930F",
+            mgmt_ip=start_ip,
+            sys_descr="Aruba 2930F-24G-4SFP+ Switch (JL259A), WC.16.10.0016",
+            platform="Aruba 2930F",
+            device_type="switch",
+            is_stp_root=True,
+            stp_root_bridge_id="32768 / 00:0b:86:11:22:33",
+            stp_bridge_id="32768 / 00:0b:86:11:22:33",
+            default_gateway="10.0.0.1",
+            status="ok",
+            response_time_ms=2.8,
+            ports=ARUBA_DEMO_HOPS[0].ports,
+            downlink_port=ARUBA_DEMO_HOPS[0].downlink_port,
+            uplink_port=PortDiagnostics(
+                port_id=24,
+                port_name="Port 24",
+                pvid=1,
+                allowed_vlans=[1, 30],
+                tagged_vlans=[30],
+                untagged_vlans=[1],
+                stp_state="forwarding",
+                link_speed_mbps=1000,
+                is_uplink=True,
+                neighbor_name="Mesh-AP-Backhaul",
+                neighbor_ip="10.0.0.1",
+                neighbor_port="eth0",
+            ),
+        )
+        hop2 = Hop(
+            hop_index=2,
+            hostname="Mesh-AP-Backhaul",
+            mgmt_ip="10.0.0.1",
+            sys_descr="Aruba AP-555 Wireless Access Point, ArubaOS 8.10.0.0",
+            platform="Aruba AP-555",
+            device_type="unknown",
+            is_stp_root=False,
+            status="no_upstream",
+            response_time_ms=2.2,
+            ports=[
+                PortDiagnostics(
+                    port_id="eth0",
+                    port_name="eth0",
+                    link_speed_mbps=1000,
+                    stp_state="unknown",
+                    is_downlink=True,
+                    neighbor_name="Aruba-2930F",
+                    neighbor_ip=start_ip,
+                    neighbor_port="Port 24",
+                ),
+            ],
+            downlink_port=PortDiagnostics(
+                port_id="eth0",
+                port_name="eth0",
+                link_speed_mbps=1000,
+                stp_state="unknown",
+                is_downlink=True,
+                neighbor_name="Aruba-2930F",
+                neighbor_ip=start_ip,
+                neighbor_port="Port 24",
+            ),
+        )
+        return UpstreamPath(
+            start_ip=start_ip,
+            hops=[hop1_continued, hop2],
+            edge_type="no_upstream",
+            edge_summary="No upstream neighbor visible from Mesh-AP-Backhaul (10.0.0.1) via LLDP — this switch appears to be the network edge.",
+            success=True,
+        )
+
     return UpstreamPath(
         start_ip=start_ip,
         hops=ARUBA_DEMO_HOPS,
-        edge_type="stp_root",
-        edge_summary="L2 STP Root reached: Aruba-2930F (10.0.0.10), Gateway: 10.0.0.1",
-        success=True,
+        edge_type="root_claimed_but_uplinks_present",
+        edge_summary=(
+            f"Aruba-2930F ({start_ip}) reports itself as STP root but LLDP shows "
+            f"upstream neighbor(s) — mesh/wireless uplink can hide the true root; "
+            f"choose a path to continue."
+        ),
+        success=False,
     )
 
 
-def get_demo_path(start_ip: str = "10.0.0.3", forced_next_ip: str | None = None) -> UpstreamPath:
+def get_demo_path(
+    start_ip: str = "10.0.0.3",
+    forced_next_ip: str | None = None,
+    endpoint_mac: str | None = None,
+) -> UpstreamPath:
     """Return a canned demo upstream path."""
     if start_ip == "10.0.0.10":
-        return get_aruba_demo_path(start_ip=start_ip)
+        return get_aruba_demo_path(start_ip=start_ip, forced_next_ip=forced_next_ip, endpoint_mac=endpoint_mac)
     if start_ip == "192.168.1.20":
         variant = "ambiguous" if not forced_next_ip else "with_upstream"
         return get_unifi_demo_path(variant=variant, start_ip=start_ip, forced_next_ip=forced_next_ip)

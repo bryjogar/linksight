@@ -32,6 +32,7 @@ OID_DOT1D_STP_ROOT_BRIDGE = "1.3.6.1.2.1.17.2.5.0"
 OID_DOT1D_STP_ROOT_COST = "1.3.6.1.2.1.17.2.6.0"
 OID_DOT1D_STP_ROOT_PORT = "1.3.6.1.2.1.17.2.7.0"
 OID_DOT1D_STP_PORT_STATE = "1.3.6.1.2.1.17.2.15.1.3"
+OID_DOT1D_TP_FDB_PORT = "1.3.6.1.2.1.17.4.3.1.2"
 
 # IF-MIB (RFC 2863)
 OID_IF_DESCR = "1.3.6.1.2.1.2.2.1.2"
@@ -201,6 +202,7 @@ class UpstreamWalker:
         endpoint_ip: str | None = None,
         stop_check: Callable[[], bool] | None = None,
         forced_next_ip: str | None = None,
+        endpoint_mac: str | None = None,
     ) -> UpstreamPath:
         """Walk the upstream switch chain starting at start_ip."""
         hops: list[Hop] = []
@@ -210,6 +212,12 @@ class UpstreamWalker:
         max_hops = 16
         edge_type = "unknown"
         edge_summary = ""
+
+        norm_endpoint_mac: str | None = None
+        if endpoint_mac:
+            cleaned_mac = endpoint_mac.replace(":", "").replace("-", "").replace(".", "").lower().strip()
+            if len(cleaned_mac) == 12:
+                norm_endpoint_mac = cleaned_mac
 
         while hop_index <= max_hops:
             if stop_check is not None and stop_check():
@@ -873,12 +881,59 @@ class UpstreamWalker:
                                 downlink_port_diag = p
                                 break
 
+                # 6. Hop 1 FDB fallback (BRIDGE-MIB dot1dTpFdbTable) for LLDP-silent endpoints
+                if downlink_port_diag is None and hop_index == 1 and norm_endpoint_mac:
+                    try:
+                        matched_bridge_port: int | None = None
+                        # 1. Exact GET optimization
+                        try:
+                            m_octets = [str(int(norm_endpoint_mac[i : i + 2], 16)) for i in range(0, 12, 2)]
+                            exact_oid = f"{OID_DOT1D_TP_FDB_PORT}.{'.'.join(m_octets)}"
+                            exact_val = client.get(exact_oid)
+                            if isinstance(exact_val, int) and not isinstance(exact_val, bool) and exact_val > 0:
+                                matched_bridge_port = exact_val
+                        except Exception:
+                            pass
+
+                        # 2. Walk dot1dTpFdbPort
+                        if matched_bridge_port is None:
+                            for oid, val in client.walk(OID_DOT1D_TP_FDB_PORT):
+                                parts = oid.strip(".").split(".")
+                                if len(parts) >= 6 and all(p.isdigit() for p in parts[-6:]):
+                                    mac_hex = "".join(f"{int(p):02x}" for p in parts[-6:])
+                                    if mac_hex == norm_endpoint_mac:
+                                        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+                                            matched_bridge_port = val
+                                            break
+                                        elif isinstance(val, str) and val.isdigit() and int(val) > 0:
+                                            matched_bridge_port = int(val)
+                                            break
+
+                        if matched_bridge_port is not None:
+                            target_if_idx = port_ifindex_map.get(matched_bridge_port, matched_bridge_port)
+                            for p in ports_list:
+                                if p is not uplink_port_diag and (
+                                    p.port_id == matched_bridge_port
+                                    or p.port_id == target_if_idx
+                                    or port_ifindex_map.get(p.port_id) == target_if_idx
+                                    or port_ifindex_map.get(p.port_id) == matched_bridge_port
+                                ):
+                                    downlink_port_diag = p
+                                    break
+
+                            if downlink_port_diag is not None:
+                                downlink_port_diag.is_downlink = True
+                                if not downlink_port_diag.neighbor_name:
+                                    downlink_port_diag.neighbor_name = "Endpoint"
+                    except Exception:
+                        pass
+
                 if downlink_port_diag is not None:
                     downlink_port_diag.is_downlink = True
 
                 candidate_uplinks: list[PortDiagnostics] = []
-                if not stp_present:
-                    if progress_callback:
+                if not stp_present or is_root:
+                    if not stp_present and progress_callback:
                         progress_callback(
                             f"STP MIB not available on {sys_name or curr_ip} — using LLDP neighbor direction"
                         )
@@ -920,7 +975,7 @@ class UpstreamWalker:
                             uplink_port_diag = forced_port
                             uplink_port_diag.is_uplink = True
                             forced_next_ip = None  # consumed
-                    elif len(candidate_uplinks) == 1:
+                    elif not is_root and len(candidate_uplinks) == 1:
                         uplink_port_diag = candidate_uplinks[0]
                         uplink_port_diag.is_uplink = True
                 elif forced_next_ip:
@@ -934,9 +989,22 @@ class UpstreamWalker:
                         uplink_port_diag.is_uplink = True
                         forced_next_ip = None
 
+                is_verified_root_from_downstream = bool(
+                    prev_hop is not None
+                    and prev_hop.stp_root_port_num is not None
+                    and prev_hop.stp_root_port_num > 0
+                    and prev_hop.uplink_port is not None
+                    and prev_hop.uplink_port.neighbor_ip == curr_ip
+                )
+
                 hop_status = "ok"
                 if is_root:
-                    hop_status = "root_reached"
+                    if uplink_port_diag is not None:
+                        hop_status = "ok"
+                    elif candidate_uplinks and (hop_index == 1 or not is_verified_root_from_downstream):
+                        hop_status = "root_claimed_but_uplinks_present"
+                    else:
+                        hop_status = "root_reached"
                 elif not stp_present:
                     if not candidate_uplinks and uplink_port_diag is None:
                         hop_status = "no_upstream"
@@ -958,18 +1026,32 @@ class UpstreamWalker:
                     ports=ports_list,
                     uplink_port=uplink_port_diag,
                     downlink_port=downlink_port_diag,
-                    ambiguous_candidates=list(candidate_uplinks) if (len(candidate_uplinks) > 1 or hop_status == "ambiguous") else [],
+                    ambiguous_candidates=list(candidate_uplinks) if (len(candidate_uplinks) > 1 or hop_status in ("ambiguous", "root_claimed_but_uplinks_present")) else [],
                     response_time_ms=(time.perf_counter() - t0) * 1000,
                 )
                 hops.append(hop)
 
                 # DIRECTION RULE CHECK:
-                # If switch IS STP Root -> STOP! Edge reached at L2 top.
+                # If switch IS STP Root:
+                # If forced uplink selected, continue. If unverified STP root with LLDP candidates,
+                # distrust STP root (wireless mesh / BPDU drop boundary) and expose candidates.
+                # Otherwise, clean L2 top reached.
                 if is_root:
-                    edge_type = "stp_root"
-                    gw_text = f", Gateway: {default_gw}" if default_gw else ""
-                    edge_summary = f"L2 STP Root reached: {sys_name or curr_ip} ({curr_ip}){gw_text}"
-                    break
+                    if uplink_port_diag is not None:
+                        pass
+                    elif candidate_uplinks and (hop_index == 1 or not is_verified_root_from_downstream):
+                        edge_type = "root_claimed_but_uplinks_present"
+                        edge_summary = (
+                            f"{sys_name or curr_ip} reports itself as STP root but LLDP shows "
+                            f"upstream neighbor(s) — mesh/wireless uplink can hide the true root; "
+                            f"choose a path to continue."
+                        )
+                        break
+                    else:
+                        edge_type = "stp_root"
+                        gw_text = f", Gateway: {default_gw}" if default_gw else ""
+                        edge_summary = f"L2 STP Root reached: {sys_name or curr_ip} ({curr_ip}){gw_text}"
+                        break
 
                 if not stp_present:
                     if not candidate_uplinks and uplink_port_diag is None:

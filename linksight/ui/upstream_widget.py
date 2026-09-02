@@ -164,7 +164,14 @@ class HopCardWidget(QFrame):
         header.addWidget(title)
 
         # STP / Role Status Tag
-        if self.hop.is_stp_root:
+        if self.hop.status == "root_claimed_but_uplinks_present":
+            tag = QLabel(" CLAIMED ROOT · MESH UPLINK ")
+            tag.setStyleSheet(
+                f"background-color: #422006; color: {WARN}; font-weight: 700; "
+                f"font-size: 10px; border-radius: 3px; padding: 2px 4px;"
+            )
+            header.addWidget(tag)
+        elif self.hop.is_stp_root:
             tag = QLabel(" STP ROOT BRIDGE ")
             tag.setStyleSheet(
                 f"background-color: #064e3b; color: {OK}; font-weight: 700; "
@@ -356,9 +363,18 @@ class HopCardWidget(QFrame):
                 center_lbl.setStyleSheet(f"color: {ACCENT}; font-family: {MONO}; font-weight: 600; font-size: 11px;")
                 path_layout.addWidget(center_lbl)
             elif downlink and not uplink:
-                root_str = " (STP Root)" if self.hop.is_stp_root else (" (Network Edge)" if self.hop.status == "no_upstream" else "")
+                root_str = (
+                    " (Claimed Root — Mesh Uplink)"
+                    if self.hop.status == "root_claimed_but_uplinks_present"
+                    else (" (STP Root)" if self.hop.is_stp_root else (" (Network Edge)" if self.hop.status == "no_upstream" else ""))
+                )
                 center_lbl = QLabel(f"──▶ [ {switch_name}{root_str} ]")
-                center_lbl.setStyleSheet(f"color: {OK if (self.hop.is_stp_root or self.hop.status == 'no_upstream') else ACCENT}; font-family: {MONO}; font-weight: 600; font-size: 11px;")
+                color = (
+                    WARN
+                    if self.hop.status in ("ambiguous", "root_claimed_but_uplinks_present")
+                    else (OK if (self.hop.is_stp_root or self.hop.status == "no_upstream") else ACCENT)
+                )
+                center_lbl.setStyleSheet(f"color: {color}; font-family: {MONO}; font-weight: 600; font-size: 11px;")
                 path_layout.addWidget(center_lbl)
             elif uplink and not downlink:
                 center_lbl = QLabel(f"[ {switch_name} ] ──▶")
@@ -418,10 +434,10 @@ class HopCardWidget(QFrame):
 
         # Ambiguous candidate continuation buttons
         candidates = list(self.hop.ambiguous_candidates)
-        if not candidates and self.hop.status == "ambiguous":
+        if not candidates and self.hop.status in ("ambiguous", "root_claimed_but_uplinks_present"):
             candidates = [p for p in self.hop.ports if p.neighbor_ip and not p.is_downlink]
 
-        if self.hop.status == "ambiguous" and candidates:
+        if self.hop.status in ("ambiguous", "root_claimed_but_uplinks_present") and candidates:
             cand_frame = QFrame()
             cand_frame.setObjectName("ambiguous_candidates")
             cand_frame.setStyleSheet(
@@ -432,7 +448,10 @@ class HopCardWidget(QFrame):
             cand_layout.setContentsMargins(8, 6, 8, 6)
             cand_layout.setSpacing(6)
 
-            cand_title = QLabel("Multiple upstream candidates found — choose a path to continue discovery:")
+            if self.hop.status == "root_claimed_but_uplinks_present":
+                cand_title = QLabel("Switch reports STP root, but upstream mesh/LLDP candidate(s) detected — choose a path to continue:")
+            else:
+                cand_title = QLabel("Multiple upstream candidates found — choose a path to continue discovery:")
             cand_title.setStyleSheet(f"color: {WARN}; font-weight: 600; font-size: 11px;")
             cand_layout.addWidget(cand_title)
 

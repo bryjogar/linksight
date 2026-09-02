@@ -36,13 +36,24 @@ class UpstreamWorker(QThread):
     finished = Signal(object)
     cancelled = Signal()
 
-    def __init__(self, start_ip: str, community: str, is_demo: bool = False, parent=None, forced_next_ip: str | None = None):
+    def __init__(
+        self,
+        start_ip: str,
+        community: str,
+        is_demo: bool = False,
+        parent=None,
+        forced_next_ip: str | None = None,
+        endpoint_ip: str | None = None,
+        endpoint_mac: str | None = None,
+    ):
         super().__init__(parent)
         self.start_ip = start_ip
         # RAM-only community: kept strictly in memory for this worker
         self.community = community
         self.is_demo = is_demo
         self.forced_next_ip = forced_next_ip
+        self.endpoint_ip = endpoint_ip
+        self.endpoint_mac = endpoint_mac
         self._stop_event = threading.Event()
 
     def stop(self) -> None:
@@ -79,7 +90,7 @@ class UpstreamWorker(QThread):
             if self._stop_event.is_set():
                 self.cancelled.emit()
                 return
-            path = get_demo_path(self.start_ip, forced_next_ip=self.forced_next_ip)
+            path = get_demo_path(self.start_ip, forced_next_ip=self.forced_next_ip, endpoint_mac=self.endpoint_mac)
             self.finished.emit(path)
         else:
             if self._stop_event.is_set():
@@ -92,6 +103,8 @@ class UpstreamWorker(QThread):
                 progress_callback=lambda msg: self.progress.emit(msg),
                 stop_check=self._stop_event.is_set,
                 forced_next_ip=self.forced_next_ip,
+                endpoint_ip=self.endpoint_ip,
+                endpoint_mac=self.endpoint_mac,
             )
             if self._stop_event.is_set():
                 self.cancelled.emit()
@@ -588,8 +601,34 @@ class MainWindow(QMainWindow):
             self._upstream_worker.stop()
             self._upstream_worker.wait(1000)
 
+        # Determine local endpoint MAC and IP from active capture interface
+        endpoint_mac = None
+        endpoint_ip = None
+        active_iface = self.iface_combo.currentData() if hasattr(self, "iface_combo") else None
+        if active_iface and hasattr(self, "interfaces"):
+            for nic in self.interfaces:
+                if nic.name == active_iface:
+                    endpoint_mac = nic.mac
+                    break
+        if not endpoint_mac and hasattr(self, "lan_widget") and getattr(self.lan_widget, "_mac_override", None):
+            endpoint_mac = self.lan_widget._mac_override
+        if hasattr(self, "lan_widget") and getattr(self.lan_widget, "_cached_cfg", None):
+            if not endpoint_mac and self.lan_widget._cached_cfg.mac:
+                endpoint_mac = self.lan_widget._cached_cfg.mac
+            if self.lan_widget._cached_cfg.ip:
+                endpoint_ip = self.lan_widget._cached_cfg.ip
+
+        if self.demo and not endpoint_mac:
+            endpoint_mac = "aa:bb:cc:11:22:33"
+
         self._upstream_worker = UpstreamWorker(
-            start_ip, community, is_demo=self.demo, parent=self, forced_next_ip=forced_next_ip
+            start_ip,
+            community,
+            is_demo=self.demo,
+            parent=self,
+            forced_next_ip=forced_next_ip,
+            endpoint_ip=endpoint_ip,
+            endpoint_mac=endpoint_mac,
         )
         self._upstream_worker.progress.connect(self._on_discovery_progress)
         self._upstream_worker.finished.connect(self._on_discovery_finished)

@@ -1039,3 +1039,161 @@ def test_walker_egress_static_and_current_union():
     assert port1.untagged_vlans == [10]
     assert port1.tagged_vlans == [20, 30]
 
+
+def test_walker_hop1_fdb_endpoint_port_lldp_silent():
+    """Verify that when endpoint sends no LLDP (LLDP-silent), hop 1 identifies the downlink port
+    via the switch's BRIDGE-MIB dot1dTpFdbTable matching the endpoint's MAC address.
+    """
+    from linksight.discovery.walker import OID_DOT1D_TP_FDB_PORT
+
+    sw_ip = "10.0.0.10"
+    endpoint_mac = "00:11:22:33:44:55"
+    # FDB entry for MAC 00:11:22:33:44:55 -> bridge port 3
+    # OID suffix: 0.17.34.51.68.85
+    sw_mib = {
+        OID_SYS_DESCR: "Switch With FDB",
+        OID_SYS_NAME: "SW-FDB",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("000b86112233"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.3": 3,
+        f"{OID_IF_NAME}.3": "Port 3",
+        f"{OID_IF_HIGH_SPEED}.3": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.3": 5,
+        f"{OID_DOT1Q_PVID}.3": 1,
+        # dot1dTpFdbPort entry for 00:11:22:33:44:55 -> bridge port 3
+        f"{OID_DOT1D_TP_FDB_PORT}.0.17.34.51.68.85": 3,
+        OID_IP_ROUTE_NEXT_HOP_DEFAULT: "10.0.0.1",
+    }
+
+    device_mibs = {sw_ip: sw_mib}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip, endpoint_mac=endpoint_mac)
+
+    assert result.success is True
+    assert len(result.hops) == 1
+    hop = result.hops[0]
+    assert hop.downlink_port is not None
+    assert hop.downlink_port.port_id == 3
+    assert hop.downlink_port.port_name == "Port 3"
+    assert hop.downlink_port.is_downlink is True
+    assert hop.downlink_port.neighbor_name == "Endpoint"
+
+
+def test_walker_hop1_fdb_no_match_downlink_stays_none():
+    """Verify that when endpoint MAC is not in switch FDB table, downlink_port stays None."""
+    from linksight.discovery.walker import OID_DOT1D_TP_FDB_PORT
+
+    sw_ip = "10.0.0.10"
+    sw_mib = {
+        OID_SYS_DESCR: "Switch With FDB",
+        OID_SYS_NAME: "SW-FDB",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("000b86112233"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.3": 3,
+        f"{OID_IF_NAME}.3": "Port 3",
+        f"{OID_IF_HIGH_SPEED}.3": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.3": 5,
+        f"{OID_DOT1Q_PVID}.3": 1,
+        # FDB has a DIFFERENT MAC (00:aa:bb:cc:dd:ee -> 0.170.187.204.221.238)
+        f"{OID_DOT1D_TP_FDB_PORT}.0.170.187.204.221.238": 3,
+        OID_IP_ROUTE_NEXT_HOP_DEFAULT: "10.0.0.1",
+    }
+
+    device_mibs = {sw_ip: sw_mib}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip, endpoint_mac="00:11:22:33:44:55")
+
+    assert result.success is True
+    hop = result.hops[0]
+    assert hop.downlink_port is None
+
+
+def test_walker_stp_root_with_lldp_candidate_mesh():
+    """Verify that when a switch claims STP root but LLDP reveals upstream neighbor candidates
+    (such as across a wireless mesh backhaul where BPDUs are dropped), the walker distrusts
+    the STP root claim, marks status as 'root_claimed_but_uplinks_present', sets edge_type
+    accordingly with informative edge_summary, and exposes the candidate uplinks.
+    """
+    from linksight.discovery.demo import ARUBA_MESH_DEMO_MIB
+
+    sw_ip = "10.0.0.10"
+    device_mibs = {sw_ip: ARUBA_MESH_DEMO_MIB}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip, endpoint_mac="00:11:22:33:44:55")
+
+    assert result.success is False
+    assert result.edge_type == "root_claimed_but_uplinks_present"
+    assert "reports itself as STP root but LLDP shows upstream neighbor(s)" in result.edge_summary
+    assert "mesh/wireless uplink can hide the true root" in result.edge_summary
+
+    assert len(result.hops) == 1
+    hop = result.hops[0]
+    assert hop.status == "root_claimed_but_uplinks_present"
+    assert hop.downlink_port is not None
+    assert hop.downlink_port.port_id == 3
+    assert hop.downlink_port.neighbor_name == "Endpoint"
+
+    assert len(hop.ambiguous_candidates) == 1
+    cand = hop.ambiguous_candidates[0]
+    assert cand.port_id == 24
+    assert cand.neighbor_name == "Mesh-AP-Backhaul"
+    assert cand.neighbor_ip == "10.0.0.1"
+
+
+def test_walker_stp_root_mesh_forced_continuation():
+    """Verify that when forced_next_ip is supplied for a mesh uplink candidate on a claimed root,
+    the walker continues discovery past the mesh boundary.
+    """
+    from linksight.discovery.demo import ARUBA_MESH_DEMO_MIB
+
+    sw_ip = "10.0.0.10"
+    ap_ip = "10.0.0.1"
+    ap_mib = {
+        OID_SYS_DESCR: "Aruba AP-555 Wireless Access Point, ArubaOS 8.10.0.0",
+        OID_SYS_NAME: "Mesh-AP-Backhaul",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86998877"),
+        # No STP support on AP
+    }
+    device_mibs = {sw_ip: ARUBA_MESH_DEMO_MIB, ap_ip: ap_mib}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip, endpoint_mac="00:11:22:33:44:55", forced_next_ip=ap_ip)
+
+    assert result.success is True
+    assert len(result.hops) == 2
+    assert result.hops[0].status == "ok"
+    assert result.hops[0].uplink_port is not None
+    assert result.hops[0].uplink_port.port_id == 24
+    assert result.hops[0].uplink_port.neighbor_ip == ap_ip
+    assert result.hops[1].hostname == "Mesh-AP-Backhaul"
+
+
+def test_walker_stp_root_zero_candidates_clean_stop():
+    """Verify that when a switch claims STP root and has 0 LLDP candidate uplinks,
+    it cleanly stops as stp_root with success=True.
+    """
+    from linksight.discovery.demo import ARUBA_DEMO_MIB
+
+    sw_ip = "10.0.0.10"
+    device_mibs = {sw_ip: ARUBA_DEMO_MIB}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip, endpoint_mac="00:11:22:33:44:55")
+
+    assert result.success is True
+    assert result.edge_type == "stp_root"
+    assert "L2 STP Root reached" in result.edge_summary
+    assert len(result.hops) == 1
+    assert result.hops[0].status == "root_reached"
+    assert result.hops[0].ambiguous_candidates == []
+
