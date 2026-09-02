@@ -623,6 +623,72 @@ def test_walker_stp_absent_single_lldp_neighbor():
     assert result.edge_type == "stp_root"
 
 
+def test_walker_stp_absent_but_base_bridge_present_uses_lldp_fallback():
+    """Verify that when dot1dBaseBridgeAddress is present but dot1dStp* are NoSuchObject,
+    the walk uses the LLDP fallback rather than dead-ending with 'root port None has no management IP'."""
+    unifi_ip = "192.168.1.20"
+    core_ip = "10.0.0.2"
+
+    unifi_mib = {
+        OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+        OID_SYS_NAME: "USW-Lite-16-PoE",
+        # dot1dBaseBridgeAddress IS present (base bridge MIB implemented)
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("7483c2112233"),
+        # dot1dStp* subtree returns NoSuchObject
+        OID_DOT1D_STP_ROOT_BRIDGE: NoSuchObject(),
+        OID_DOT1D_STP_ROOT_PORT: NoSuchObject(),
+        f"{OID_IF_NAME}.1": "Port 1",
+        f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+        f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+        f"{OID_IF_NAME}.16": "Port 16",
+        f"{OID_LLDP_REM_SYS_NAME}.0.16.1": "Core-SW1",
+        f"{OID_LLDP_REM_PORT_ID}.0.16.1": "Gi0/24",
+        f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.16.1.1.4.10.0.0.2": 1,
+    }
+    core_mib = {
+        OID_SYS_DESCR: "Cisco Catalyst 2960X",
+        OID_SYS_NAME: "Core-SW1",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001a2b3c4d5e"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000001a2b3c4d5e"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_IF_NAME}.24": "Gi0/24",
+    }
+
+    device_mibs = {
+        unifi_ip: unifi_mib,
+        core_ip: core_mib,
+    }
+
+    progress_messages = []
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=unifi_ip, progress_callback=progress_messages.append)
+
+    assert result.success is True
+    assert len(result.hops) == 2
+    assert any("STP MIB not available on USW-Lite-16-PoE — using LLDP neighbor direction" in m for m in progress_messages)
+
+    hop1 = result.hops[0]
+    assert hop1.hostname == "USW-Lite-16-PoE"
+    assert hop1.mgmt_ip == unifi_ip
+    assert hop1.is_stp_root is False
+    assert hop1.stp_bridge_id == "74:83:c2:11:22:33"
+    assert hop1.stp_root_port_num is None
+    assert hop1.uplink_port is not None
+    assert hop1.uplink_port.port_id == 16
+    assert hop1.uplink_port.is_uplink is True
+    assert hop1.uplink_port.is_root_port is False
+    assert hop1.uplink_port.neighbor_ip == core_ip
+    assert hop1.uplink_port.neighbor_name == "Core-SW1"
+    assert hop1.status == "ok"
+
+    hop2 = result.hops[1]
+    assert hop2.hostname == "Core-SW1"
+    assert hop2.is_stp_root is True
+    assert result.edge_type == "stp_root"
+    assert "root port None has no management IP" not in result.edge_summary
+
+
 def test_walker_stp_absent_zero_lldp_neighbors_edge_stop():
     """Verify that when STP data is absent and no LLDP upstream neighbor exists, walk stops cleanly as no_upstream."""
     unifi_ip = "192.168.1.20"

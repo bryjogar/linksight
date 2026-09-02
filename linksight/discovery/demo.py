@@ -17,6 +17,7 @@ from .walker import (
     OID_IP_ROUTE_NEXT_HOP_DEFAULT,
     OID_IP_ROUTE_IF_INDEX_DEFAULT,
     OID_IP_NET_TO_MEDIA_TABLE,
+    OID_DOT1D_BASE_BRIDGE_ADDRESS,
 )
 
 # Canned multi-hop upstream chain for demo mode
@@ -277,6 +278,7 @@ UNIFI_DEMO_MIB_WITH_UPSTREAM: dict[str, any] = {
     OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
     OID_SYS_NAME: "USW-Lite-16-PoE",
     OID_SYS_OBJECT_ID: "1.3.6.1.4.1.41112.1.4",
+    OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("7483c2112233"),
     f"{OID_IF_NAME}.1": "Port 1",
     f"{OID_IF_HIGH_SPEED}.1": 1000,
     f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
@@ -312,6 +314,7 @@ UNIFI_DEMO_MIB_NO_UPSTREAM: dict[str, any] = {
     OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
     OID_SYS_NAME: "USW-Lite-16-PoE",
     OID_SYS_OBJECT_ID: "1.3.6.1.4.1.41112.1.4",
+    OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("7483c2112233"),
     f"{OID_IF_NAME}.1": "Port 1",
     f"{OID_IF_HIGH_SPEED}.1": 1000,
     f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
@@ -327,6 +330,7 @@ UNIFI_DEMO_HOPS_WITH_UPSTREAM: list[Hop] = [
         platform="Ubiquiti USW-Lite-16-PoE",
         device_type="switch",
         is_stp_root=False,
+        stp_bridge_id="74:83:c2:11:22:33",
         status="ok",
         response_time_ms=3.1,
         ports=[
@@ -459,6 +463,7 @@ UNIFI_DEMO_HOPS_NO_UPSTREAM: list[Hop] = [
         platform="Ubiquiti USW-Lite-16-PoE",
         device_type="switch",
         is_stp_root=False,
+        stp_bridge_id="74:83:c2:11:22:33",
         status="no_upstream",
         response_time_ms=3.1,
         ports=[

@@ -8,6 +8,16 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from ..capture.interfaces import list_interfaces, NetInterface
 
 
+
+def _default_state_provider() -> list[NetInterface]:
+    # list_interfaces(reload=True) reloads scapy's conf.ifaces cache so newly
+    # plugged USB adapters / hotplugged interfaces are discovered on each poll.
+    # Calling reload() on every 2s poll tick is lightweight on desktop platforms
+    # (sub-millisecond to a few milliseconds) while ensuring rapid detection when
+    # an adapter is plugged in, avoiding the complexity of a slower sub-timer.
+    return list_interfaces(reload=True)
+
+
 class InterfaceWatcher(QObject):
     """Monitors network interfaces for link flaps, IP acquisitions, and adapter additions/removals.
 
@@ -29,7 +39,10 @@ class InterfaceWatcher(QObject):
     ):
         super().__init__(parent)
         self._active_interface = active_interface
-        self._state_provider = state_provider or list_interfaces
+        if state_provider is None or state_provider is list_interfaces:
+            self._state_provider = _default_state_provider
+        else:
+            self._state_provider = state_provider
         self._poll_interval_ms = poll_interval_ms
 
         self._last_snapshot: list[NetInterface] = []
@@ -70,8 +83,11 @@ class InterfaceWatcher(QObject):
             self._active_was_down = False
             self._active_up_ticks = 0
 
-    def set_state_provider(self, provider: Callable[[], list[NetInterface]]) -> None:
-        self._state_provider = provider
+    def set_state_provider(self, provider: Callable[[], list[NetInterface]] | None) -> None:
+        if provider is None or provider is list_interfaces:
+            self._state_provider = _default_state_provider
+        else:
+            self._state_provider = provider
 
     def _read_state(self) -> list[NetInterface]:
         try:

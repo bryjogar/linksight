@@ -260,6 +260,65 @@ def test_interface_watcher_active_interface_vanished():
     watcher.stop()
 
 
+def test_interface_watcher_hotplug_new_adapter_emits_changed():
+    """Verify that when a newly plugged adapter appears on subsequent polls, interfaces_changed is emitted."""
+    app = QApplication.instance() or QApplication([])
+
+    poll_count = 0
+
+    def fake_reloading_provider() -> list[NetInterface]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return [NetInterface(name="eth0", ips=["192.168.1.10"], is_up=True)]
+        return [
+            NetInterface(name="eth0", ips=["192.168.1.10"], is_up=True),
+            NetInterface(name="eth1_usb", ips=["192.168.1.50"], is_up=True, description="USB Ethernet Adapter"),
+        ]
+
+    watcher = InterfaceWatcher(
+        active_interface="eth0",
+        state_provider=fake_reloading_provider,
+        poll_interval_ms=10000,
+    )
+    watcher.start()
+
+    changed_events: list[list[NetInterface]] = []
+    watcher.interfaces_changed.connect(changed_events.append)
+
+    # First call to provider occurred during start() with eth0 only.
+    # Second call to provider occurs on check_now() with the new adapter -> interfaces_changed emitted.
+    watcher.check_now()
+    assert len(changed_events) == 1
+    assert len(changed_events[0]) == 2
+    assert any(nic.name == "eth1_usb" for nic in changed_events[0])
+
+    watcher.stop()
+
+
+def test_interface_watcher_default_state_provider_uses_reload(monkeypatch):
+    """Verify the default state provider invokes list_interfaces with reload=True to pick up new adapters."""
+    app = QApplication.instance() or QApplication([])
+    reload_args: list[bool] = []
+
+    def fake_list_interfaces(reload: bool = False) -> list[NetInterface]:
+        reload_args.append(reload)
+        return [NetInterface(name="eth0", ips=["192.168.1.10"], is_up=True)]
+
+    monkeypatch.setattr("linksight.ui.interface_watcher.list_interfaces", fake_list_interfaces)
+
+    watcher = InterfaceWatcher(active_interface="eth0")
+    # Read state directly
+    nics = watcher._read_state()
+    assert reload_args == [True]
+    assert len(nics) == 1
+    assert nics[0].name == "eth0"
+
+    # Also verify check_now uses the reloading default provider
+    watcher.check_now()
+    assert reload_args == [True, True]
+
+
 def test_nic_status_widget_refresh_preserves_selection():
     """Verify NicStatusWidget refresh preserves user selection in place."""
     app = QApplication.instance() or QApplication([])

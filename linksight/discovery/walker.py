@@ -542,7 +542,9 @@ class UpstreamWalker:
                 except Exception:
                     pass
 
-                stp_present = (stp_root_port is not None) or bool(bridge_addr) or bool(stp_root_bridge)
+                # STP is present only if we have usable STP direction data (root port or root bridge).
+                # A bare dot1dBaseBridgeAddress is just the bridge MAC (base BRIDGE-MIB), not a direction signal.
+                stp_present = (stp_root_port is not None) or bool(stp_root_bridge)
 
                 # 3. Tables: Port to ifIndex, STP Port State, Interface Speeds, Names
                 port_ifindex_map: dict[int, int] = {}
