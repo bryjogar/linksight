@@ -347,7 +347,8 @@ class SnmpClient:
 
     def _get_socket(self) -> socket.socket:
         if self._sock is None:
-            self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            family = socket.AF_INET6 if ":" in str(self.host) else socket.AF_INET
+            self._sock = socket.socket(family, socket.SOCK_DGRAM)
             self._sock.settimeout(self.timeout)
         return self._sock
 

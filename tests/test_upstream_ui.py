@@ -229,6 +229,31 @@ def test_switch_info_widget_upstream_button():
     widget.upstream_btn.click()
     assert emitted_ips == ["10.0.0.2"]
 
+    # 3b. Device advertising IPv6 first must prefer IPv4 when both present
+    dev_dual = NeighborDevice(
+        protocol="lldp",
+        source_interface="eth0",
+        system_name="Dual-Stack-SW",
+        management_ips=["fe80::1:2:3:4", "10.10.10.1"],
+        port_id="Gi0/1",
+    )
+    widget.show_device(dev_dual)
+    assert widget._current_mgmt_ip == "10.10.10.1"
+    assert widget.upstream_btn.toolTip() == "Walk upstream switches starting from 10.10.10.1"
+
+    # 3c. IPv6-only (link-local) device: no walkable IP, button prompts for manual entry
+    dev_v6_only = NeighborDevice(
+        protocol="lldp",
+        source_interface="eth0",
+        system_name="V6-SW",
+        management_ips=["fe80::1:2:3:4"],
+        port_id="Gi0/2",
+    )
+    widget.show_device(dev_v6_only)
+    assert widget._current_mgmt_ip == ""
+    assert widget.upstream_btn.isEnabled() is True
+    assert "No IPv4 management IP" in widget.upstream_btn.toolTip()
+
     # 4. Setting management IP manually updates widget state
     widget.set_management_ip("192.168.1.50")
     assert widget._current_mgmt_ip == "192.168.1.50"

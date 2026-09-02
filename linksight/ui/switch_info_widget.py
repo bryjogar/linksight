@@ -114,9 +114,22 @@ class SwitchInfoWidget(QWidget):
         self._render(rows)
 
         if dev.management_ips:
-            self._current_mgmt_ip = dev.management_ips[0]
-            self.upstream_btn.setEnabled(True)
-            self.upstream_btn.setToolTip(f"Walk upstream switches starting from {self._current_mgmt_ip}")
+            # Prefer IPv4 management addresses for the upstream walk (SNMP/ARP
+            # are IPv4-first); only fall back to IPv6 when no IPv4 is advertised.
+            # Skip IPv6 link-local (fe80::) — unreachable without a zone/scope ID.
+            ipv4_ips = [ip for ip in dev.management_ips if ":" not in ip]
+            if ipv4_ips:
+                self._current_mgmt_ip = ipv4_ips[0]
+            else:
+                self._current_mgmt_ip = ""
+            if self._current_mgmt_ip:
+                self.upstream_btn.setEnabled(True)
+                self.upstream_btn.setToolTip(f"Walk upstream switches starting from {self._current_mgmt_ip}")
+            else:
+                self.upstream_btn.setEnabled(True)
+                self.upstream_btn.setToolTip(
+                    "No IPv4 management IP advertised by switch — click to enter the switch management IP"
+                )
         else:
             self._current_mgmt_ip = ""
             self.upstream_btn.setEnabled(True)
