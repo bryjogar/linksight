@@ -30,7 +30,7 @@ SCENARIO: list[tuple[str, bytes]] = [
     ("eth0", build_lldp_frame(
         chassis_mac="aa:bb:cc:00:11:22", system_name="Access-SW2",
         system_desc="Cisco IOS Software, C2960L Software (C2960L-UNIVERSALK9-M), Version 15.2(7)E",
-        port_id="Gi1/0/1", mgmt_ip="10.0.0.3", vlan=200)),
+        port_id="Port 3", mgmt_ip="10.0.0.3", vlan=1)),
     ("eth0", build_lldp_frame(
         chassis_mac="02:00:00:00:00:64", system_name="lab-ap-2",
         system_desc="Ubiquiti UAP-AC-PRO", port_id="eth0", mgmt_ip="10.0.0.65", vlan=100)),

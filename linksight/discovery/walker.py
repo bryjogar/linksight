@@ -45,6 +45,8 @@ OID_IF_HIGH_SPEED = "1.3.6.1.2.1.31.1.1.1.15"
 OID_DOT1Q_PVID = "1.3.6.1.2.1.17.7.1.4.5.1.1"
 OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS = "1.3.6.1.2.1.17.7.1.4.3.1.2"
 OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS = "1.3.6.1.2.1.17.7.1.4.2.1.4"
+OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS = "1.3.6.1.2.1.17.7.1.4.3.1.3"
+OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS = "1.3.6.1.2.1.17.7.1.4.2.1.5"
 
 # LLDP-MIB (IEEE 802.1AB)
 OID_LLDP_REM_PORT_ID = "1.0.8802.1.1.2.1.4.1.1.7"
@@ -109,8 +111,10 @@ def _format_mac(val: bytes | str | None) -> str:
     return ""
 
 
-def _ports_from_bitmask(bitmask: bytes) -> list[int]:
+def _ports_from_bitmask(bitmask: bytes | str) -> list[int]:
     """Decode Q-BRIDGE-MIB port bitmask to list of 1-based port numbers."""
+    if isinstance(bitmask, str):
+        bitmask = bitmask.encode("latin-1")
     ports: list[int] = []
     for byte_idx, b in enumerate(bitmask):
         for bit_idx in range(8):
@@ -606,22 +610,57 @@ class UpstreamWalker:
 
                 # 4. VLAN Information (Q-BRIDGE-MIB)
                 port_pvids: dict[int, int] = {}
-                port_allowed_vlans: dict[int, set[int]] = {}
+                port_egress_vlans: dict[int, set[int]] = {}
+                port_untagged_vlans: dict[int, set[int]] = {}
+                untagged_tables_readable = False
+
                 try:
                     for oid, val in client.walk(OID_DOT1Q_PVID):
                         p_num = _parse_last_oid_index(oid)
-                        if p_num is not None and isinstance(val, int):
+                        if p_num is not None and isinstance(val, int) and not isinstance(val, bool):
                             port_pvids[p_num] = val
-                            port_allowed_vlans.setdefault(p_num, set()).add(val)
                 except Exception:
                     pass
 
+                # Configured membership: static egress table
                 try:
                     for oid, val in client.walk(OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS):
                         vlan_id = _parse_last_oid_index(oid)
-                        if vlan_id is not None and isinstance(val, bytes):
+                        if vlan_id is not None and isinstance(val, (bytes, str)) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
                             for p_num in _ports_from_bitmask(val):
-                                port_allowed_vlans.setdefault(p_num, set()).add(vlan_id)
+                                port_egress_vlans.setdefault(p_num, set()).add(vlan_id)
+                except Exception:
+                    pass
+
+                # Operational membership: current egress table
+                try:
+                    for oid, val in client.walk(OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS):
+                        vlan_id = _parse_last_oid_index(oid)
+                        if vlan_id is not None and isinstance(val, (bytes, str)) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                            for p_num in _ports_from_bitmask(val):
+                                port_egress_vlans.setdefault(p_num, set()).add(vlan_id)
+                except Exception:
+                    pass
+
+                # Untagged membership: static untagged table
+                try:
+                    for oid, val in client.walk(OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS):
+                        vlan_id = _parse_last_oid_index(oid)
+                        if vlan_id is not None and isinstance(val, (bytes, str)) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                            untagged_tables_readable = True
+                            for p_num in _ports_from_bitmask(val):
+                                port_untagged_vlans.setdefault(p_num, set()).add(vlan_id)
+                except Exception:
+                    pass
+
+                # Untagged membership: current untagged table
+                try:
+                    for oid, val in client.walk(OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS):
+                        vlan_id = _parse_last_oid_index(oid)
+                        if vlan_id is not None and isinstance(val, (bytes, str)) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                            untagged_tables_readable = True
+                            for p_num in _ports_from_bitmask(val):
+                                port_untagged_vlans.setdefault(p_num, set()).add(vlan_id)
                 except Exception:
                     pass
 
@@ -696,7 +735,13 @@ class UpstreamWalker:
 
                 # Assemble port diagnostics
                 ports_list: list[PortDiagnostics] = []
-                all_port_ids = set(port_pvids.keys()) | set(stp_port_states.keys()) | set(port_neighbors.keys())
+                all_port_ids = (
+                    set(port_pvids.keys())
+                    | set(stp_port_states.keys())
+                    | set(port_neighbors.keys())
+                    | set(port_egress_vlans.keys())
+                    | set(port_untagged_vlans.keys())
+                )
                 if stp_root_port and stp_root_port > 0:
                     all_port_ids.add(stp_root_port)
 
@@ -706,7 +751,21 @@ class UpstreamWalker:
                     p_speed = if_speeds.get(if_idx) or if_speeds.get(p_num)
                     p_state = stp_port_states.get(p_num, "forwarding" if is_root else "unknown")
                     p_pvid = port_pvids.get(p_num)
-                    p_allowed = sorted(port_allowed_vlans.get(p_num, []))
+
+                    egress_set = port_egress_vlans.get(p_num, set())
+                    untagged_set = port_untagged_vlans.get(p_num, set())
+
+                    if untagged_tables_readable:
+                        p_untagged = sorted(untagged_set)
+                        p_tagged = sorted(egress_set - untagged_set)
+                        p_allowed = sorted(set(p_untagged) | set(p_tagged))
+                        if not p_allowed and p_pvid is not None:
+                            p_allowed = [p_pvid]
+                    else:
+                        p_untagged = []
+                        p_tagged = []
+                        p_allowed = sorted(egress_set) if egress_set else ([p_pvid] if p_pvid is not None else [])
+
                     p_neigh = port_neighbors.get(p_num) or port_neighbors.get(if_idx) or {}
 
                     is_this_root_port = bool(stp_root_port and p_num == stp_root_port)
@@ -715,7 +774,9 @@ class UpstreamWalker:
                         port_id=p_num,
                         port_name=p_name,
                         pvid=p_pvid,
-                        allowed_vlans=p_allowed if p_allowed else ([p_pvid] if p_pvid else []),
+                        allowed_vlans=p_allowed,
+                        tagged_vlans=p_tagged,
+                        untagged_vlans=p_untagged,
                         stp_state=p_state,
                         link_speed_mbps=p_speed,
                         is_root_port=is_this_root_port,

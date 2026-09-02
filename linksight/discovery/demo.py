@@ -18,6 +18,15 @@ from .walker import (
     OID_IP_ROUTE_IF_INDEX_DEFAULT,
     OID_IP_NET_TO_MEDIA_TABLE,
     OID_DOT1D_BASE_BRIDGE_ADDRESS,
+    OID_DOT1D_STP_ROOT_BRIDGE,
+    OID_DOT1D_STP_ROOT_PORT,
+    OID_DOT1D_BASE_PORT_IFINDEX,
+    OID_DOT1D_STP_PORT_STATE,
+    OID_DOT1Q_PVID,
+    OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS,
+    OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS,
+    OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS,
+    OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS,
 )
 
 # Canned multi-hop upstream chain for demo mode
@@ -38,10 +47,12 @@ DEMO_HOPS: list[Hop] = [
         response_time_ms=4.2,
         ports=[
             PortDiagnostics(
-                port_id=1,
-                port_name="Gi1/0/1",
-                pvid=200,
-                allowed_vlans=[200],
+                port_id=3,
+                port_name="Port 3",
+                pvid=1,
+                allowed_vlans=[1, 30],
+                tagged_vlans=[30],
+                untagged_vlans=[1],
                 stp_state="forwarding",
                 link_speed_mbps=1000,
                 is_downlink=True,
@@ -70,6 +81,8 @@ DEMO_HOPS: list[Hop] = [
                 port_name="Gi1/0/24",
                 pvid=100,
                 allowed_vlans=[100, 200, 300],
+                tagged_vlans=[200, 300],
+                untagged_vlans=[100],
                 stp_state="forwarding",
                 link_speed_mbps=1000,
                 is_root_port=True,
@@ -84,6 +97,8 @@ DEMO_HOPS: list[Hop] = [
             port_name="Gi1/0/24",
             pvid=100,
             allowed_vlans=[100, 200, 300],
+            tagged_vlans=[200, 300],
+            untagged_vlans=[100],
             stp_state="forwarding",
             link_speed_mbps=1000,
             is_root_port=True,
@@ -93,10 +108,12 @@ DEMO_HOPS: list[Hop] = [
             neighbor_port="Gi0/24",
         ),
         downlink_port=PortDiagnostics(
-            port_id=1,
-            port_name="Gi1/0/1",
-            pvid=200,
-            allowed_vlans=[200],
+            port_id=3,
+            port_name="Port 3",
+            pvid=1,
+            allowed_vlans=[1, 30],
+            tagged_vlans=[30],
+            untagged_vlans=[1],
             stp_state="forwarding",
             link_speed_mbps=1000,
             is_downlink=True,
@@ -319,6 +336,51 @@ UNIFI_DEMO_MIB_NO_UPSTREAM: dict[str, any] = {
     f"{OID_IF_HIGH_SPEED}.1": 1000,
     f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
     f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+}
+
+# Aruba 2930F Switch MIB (port 3 has untagged VLAN 1 and tagged VLAN 30)
+# Static table has configured untagged membership for VLAN 1;
+# Current tables carry operational membership for VLAN 1 and tagged VLAN 30.
+ARUBA_DEMO_MIB: dict[str, any] = {
+    OID_SYS_DESCR: "Aruba 2930F-24G-4SFP+ Switch (JL259A), WC.16.10.0016",
+    OID_SYS_NAME: "Aruba-2930F",
+    OID_SYS_OBJECT_ID: "1.3.6.1.4.1.11.2.3.7.11.162",
+    OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+    OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("000b86112233"),
+    OID_DOT1D_STP_ROOT_PORT: 0,
+    f"{OID_DOT1D_BASE_PORT_IFINDEX}.3": 3,
+    f"{OID_IF_NAME}.3": "Port 3",
+    f"{OID_IF_HIGH_SPEED}.3": 1000,
+    f"{OID_DOT1D_STP_PORT_STATE}.3": 5,
+    f"{OID_DOT1Q_PVID}.3": 1,
+    # Static table: configured membership for VLAN 1 (port 3 is bit 2: 0x20)
+    f"{OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS}.1": bytes([0x20]),
+    f"{OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS}.1": bytes([0x20]),
+    # Current table: operational membership for VLAN 1 and tagged VLAN 30
+    f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.1": bytes([0x20]),
+    f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.30": bytes([0x20]),
+    f"{OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS}.0.1": bytes([0x20]),
+    OID_IP_ROUTE_NEXT_HOP_DEFAULT: "10.0.0.1",
+}
+
+# Aruba switch MIB fixture variant: ONLY current tables carry membership (simulating sparse static)
+ARUBA_DEMO_MIB_CURRENT_ONLY: dict[str, any] = {
+    OID_SYS_DESCR: "Aruba 2930F-24G-4SFP+ Switch (JL259A), WC.16.10.0016",
+    OID_SYS_NAME: "Aruba-2930F",
+    OID_SYS_OBJECT_ID: "1.3.6.1.4.1.11.2.3.7.11.162",
+    OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+    OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("000b86112233"),
+    OID_DOT1D_STP_ROOT_PORT: 0,
+    f"{OID_DOT1D_BASE_PORT_IFINDEX}.3": 3,
+    f"{OID_IF_NAME}.3": "Port 3",
+    f"{OID_IF_HIGH_SPEED}.3": 1000,
+    f"{OID_DOT1D_STP_PORT_STATE}.3": 5,
+    f"{OID_DOT1Q_PVID}.3": 1,
+    # Static tables completely absent (current-only membership)
+    f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.1": bytes([0x20]),
+    f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.30": bytes([0x20]),
+    f"{OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS}.0.1": bytes([0x20]),
+    OID_IP_ROUTE_NEXT_HOP_DEFAULT: "10.0.0.1",
 }
 
 UNIFI_DEMO_HOPS_WITH_UPSTREAM: list[Hop] = [
@@ -606,10 +668,12 @@ def get_unifi_demo_path(
         )
     if forced_next_ip == "10.0.0.10":
         aruba_port_down = PortDiagnostics(
-            port_id="1/1",
-            port_name="1/1",
+            port_id=3,
+            port_name="Port 3",
             pvid=1,
-            allowed_vlans=[1, 10, 20],
+            allowed_vlans=[1, 30],
+            tagged_vlans=[30],
+            untagged_vlans=[1],
             stp_state="forwarding",
             link_speed_mbps=1000,
             is_downlink=True,
@@ -640,7 +704,7 @@ def get_unifi_demo_path(
                 is_uplink=True,
                 neighbor_name="Aruba-2930F",
                 neighbor_ip="10.0.0.10",
-                neighbor_port="1/1",
+                neighbor_port="Port 3",
             ),
             ambiguous_candidates=UNIFI_DEMO_HOPS_AMBIGUOUS[0].ambiguous_candidates,
         )
@@ -736,8 +800,69 @@ def get_unifi_demo_path(
     )
 
 
+ARUBA_DEMO_HOPS: list[Hop] = [
+    Hop(
+        hop_index=1,
+        hostname="Aruba-2930F",
+        mgmt_ip="10.0.0.10",
+        sys_descr="Aruba 2930F-24G-4SFP+ Switch (JL259A), WC.16.10.0016",
+        platform="Aruba 2930F",
+        device_type="switch",
+        is_stp_root=True,
+        stp_root_bridge_id="32768 / 00:0b:86:11:22:33",
+        stp_bridge_id="32768 / 00:0b:86:11:22:33",
+        default_gateway="10.0.0.1",
+        status="root_reached",
+        response_time_ms=2.8,
+        ports=[
+            PortDiagnostics(
+                port_id=3,
+                port_name="Port 3",
+                pvid=1,
+                allowed_vlans=[1, 30],
+                tagged_vlans=[30],
+                untagged_vlans=[1],
+                stp_state="forwarding",
+                link_speed_mbps=1000,
+                is_downlink=True,
+                neighbor_name="Local-Host",
+                neighbor_ip="10.0.0.42",
+                neighbor_port="eth0",
+            ),
+        ],
+        downlink_port=PortDiagnostics(
+            port_id=3,
+            port_name="Port 3",
+            pvid=1,
+            allowed_vlans=[1, 30],
+            tagged_vlans=[30],
+            untagged_vlans=[1],
+            stp_state="forwarding",
+            link_speed_mbps=1000,
+            is_downlink=True,
+            neighbor_name="Local-Host",
+            neighbor_ip="10.0.0.42",
+            neighbor_port="eth0",
+        ),
+    ),
+]
+
+
+def get_aruba_demo_path(start_ip: str = "10.0.0.10") -> UpstreamPath:
+    """Return a canned demo upstream path for an Aruba switch."""
+    return UpstreamPath(
+        start_ip=start_ip,
+        hops=ARUBA_DEMO_HOPS,
+        edge_type="stp_root",
+        edge_summary="L2 STP Root reached: Aruba-2930F (10.0.0.10), Gateway: 10.0.0.1",
+        success=True,
+    )
+
+
 def get_demo_path(start_ip: str = "10.0.0.3", forced_next_ip: str | None = None) -> UpstreamPath:
     """Return a canned demo upstream path."""
+    if start_ip == "10.0.0.10":
+        return get_aruba_demo_path(start_ip=start_ip)
     if start_ip == "192.168.1.20":
         variant = "ambiguous" if not forced_next_ip else "with_upstream"
         return get_unifi_demo_path(variant=variant, start_ip=start_ip, forced_next_ip=forced_next_ip)

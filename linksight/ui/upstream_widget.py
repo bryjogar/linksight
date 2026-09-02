@@ -72,12 +72,23 @@ def _format_port_status(port: PortDiagnostics) -> tuple[str, str]:
 
 
 def _format_port_details_html(port: PortDiagnostics) -> str:
-    """Format line 2 for compact path port block: PVID, allowed VLANs, STP state, link speed."""
+    """Format line 2 for compact path port block: PVID, VLANs (tagged/untagged or allowed), STP state, link speed."""
     parts = []
 
-    # 1. PVID & Allowed VLANs
-    pvid_str = f"PVID {port.pvid}" if port.pvid is not None else ""
-    if port.allowed_vlans:
+    # 1. PVID & VLANs
+    pvid_val = port.effective_pvid
+    pvid_str = f"PVID {pvid_val}" if pvid_val is not None else ""
+
+    if port.untagged_vlans or port.tagged_vlans:
+        if pvid_str:
+            parts.append(f"<span style='color:{ACCENT}; font-weight:600;'>{pvid_str}</span>")
+        if port.untagged_vlans:
+            untagged_str = ", ".join(str(v) for v in port.untagged_vlans)
+            parts.append(f"<span style='color:{OK}; font-weight:600;'>UNTAGGED {untagged_str}</span>")
+        if port.tagged_vlans:
+            tagged_str = ", ".join(str(v) for v in port.tagged_vlans)
+            parts.append(f"<span style='color:{ACCENT}; font-weight:600;'>TAGGED {tagged_str}</span>")
+    elif port.allowed_vlans:
         vlans_str = ", ".join(str(v) for v in port.allowed_vlans)
         vlan_part = f"VLANs {vlans_str}"
         if pvid_str:
@@ -512,7 +523,8 @@ class HopCardWidget(QFrame):
                 self.table.setItem(row_idx, 0, it_port)
 
                 # 2. PVID
-                pvid_str = str(port.pvid) if port.pvid is not None else "—"
+                pvid_val = port.effective_pvid
+                pvid_str = str(pvid_val) if pvid_val is not None else "—"
                 it_pvid = QTableWidgetItem(pvid_str)
                 it_pvid.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
                 self.table.setItem(row_idx, 1, it_pvid)
@@ -521,6 +533,13 @@ class HopCardWidget(QFrame):
                 vlans_str = ", ".join(str(v) for v in port.allowed_vlans) if port.allowed_vlans else "—"
                 it_vlans = QTableWidgetItem(vlans_str)
                 it_vlans.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                if port.untagged_vlans or port.tagged_vlans:
+                    tip_parts = []
+                    if port.untagged_vlans:
+                        tip_parts.append(f"Untagged: {', '.join(str(v) for v in port.untagged_vlans)}")
+                    if port.tagged_vlans:
+                        tip_parts.append(f"Tagged: {', '.join(str(v) for v in port.tagged_vlans)}")
+                    it_vlans.setToolTip(" · ".join(tip_parts))
                 self.table.setItem(row_idx, 2, it_vlans)
 
                 # 4. STP / Oper Status

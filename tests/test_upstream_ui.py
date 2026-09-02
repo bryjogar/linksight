@@ -59,20 +59,22 @@ def test_upstream_widget_render_demo_path():
 
     assert card_count == 3
 
-    # 1. Hop 1 (Access-SW2): Path summary block with downlink Gi1/0/1 and uplink Gi1/0/24
+    # 1. Hop 1 (Access-SW2): Path summary block with downlink Port 3 and uplink Gi1/0/24
     hop1_card = cards[0]
     hop1_summary = hop1_card.findChild(QFrame, "path_summary")
     assert hop1_summary is not None
     hop1_labels_text = " ".join(lbl.text() for lbl in hop1_summary.findChildren(QLabel))
-    assert "Gi1/0/1" in hop1_labels_text
+    assert "Port 3" in hop1_labels_text
     assert "Gi1/0/24" in hop1_labels_text
     # Item 3: Current-port VLAN/STP/speed details outside the collapsed table
-    assert "PVID 200" in hop1_labels_text
-    assert "VLANs 200" in hop1_labels_text
+    assert "PVID 1" in hop1_labels_text
+    assert "UNTAGGED 1" in hop1_labels_text
+    assert "TAGGED 30" in hop1_labels_text
     assert "STP forwarding" in hop1_labels_text
     assert "1 Gbps" in hop1_labels_text
     assert "PVID 100" in hop1_labels_text
-    assert "VLANs 100, 200, 300" in hop1_labels_text
+    assert "UNTAGGED 100" in hop1_labels_text
+    assert "TAGGED 200, 300" in hop1_labels_text
     # Table collapsed by default
     assert hop1_card.table is not None
     assert hop1_card.table.isHidden() is True
@@ -706,4 +708,133 @@ def test_hop_card_widget_ambiguous_candidate_buttons():
     assert emitted == ["10.0.0.10", "192.168.1.50"]
 
     widget.close()
+
+
+def test_upstream_widget_render_aruba_fixture():
+    """Verify compact block line shows TAGGED 30 / UNTAGGED 1 for the Aruba fixture."""
+    from PySide6.QtWidgets import QFrame, QLabel
+    from linksight.discovery.demo import get_aruba_demo_path
+
+    app = QApplication.instance() or QApplication([])
+    widget = UpstreamWidget()
+    widget.show()
+    path = get_aruba_demo_path()
+
+    widget.show_path(path)
+
+    cards: list[HopCardWidget] = [
+        widget.cards_layout.itemAt(i).widget()
+        for i in range(widget.cards_layout.count())
+        if isinstance(widget.cards_layout.itemAt(i).widget(), HopCardWidget)
+    ]
+    assert len(cards) == 1
+    aruba_card = cards[0]
+    summary_frame = aruba_card.findChild(QFrame, "path_summary")
+    assert summary_frame is not None
+    summary_text = " ".join(lbl.text() for lbl in summary_frame.findChildren(QLabel))
+
+    assert "Port 3" in summary_text
+    assert "PVID 1" in summary_text
+    assert "UNTAGGED 1" in summary_text
+    assert "TAGGED 30" in summary_text
+    assert "STP forwarding" in summary_text
+    assert "1 Gbps" in summary_text
+
+    widget.close()
+
+
+def test_upstream_widget_render_allowed_vlans_fallback():
+    """Verify compact block line keeps 'PVID 1 · VLANs 1,30' format when untagged tables absent."""
+    from PySide6.QtWidgets import QFrame, QLabel
+    from linksight.discovery.models import Hop, PortDiagnostics, UpstreamPath
+
+    app = QApplication.instance() or QApplication([])
+    widget = UpstreamWidget()
+    widget.show()
+
+    down_port = PortDiagnostics(
+        port_id=1,
+        port_name="Gi0/1",
+        pvid=1,
+        allowed_vlans=[1, 30],
+        tagged_vlans=[],
+        untagged_vlans=[],
+        stp_state="forwarding",
+        link_speed_mbps=1000,
+        is_downlink=True,
+    )
+    hop = Hop(
+        hop_index=1,
+        hostname="Fallback-SW",
+        mgmt_ip="10.0.0.5",
+        status="ok",
+        ports=[down_port],
+        downlink_port=down_port,
+    )
+    path = UpstreamPath(start_ip="10.0.0.5", hops=[hop], success=True)
+    widget.show_path(path)
+
+    cards: list[HopCardWidget] = [
+        widget.cards_layout.itemAt(i).widget()
+        for i in range(widget.cards_layout.count())
+        if isinstance(widget.cards_layout.itemAt(i).widget(), HopCardWidget)
+    ]
+    summary_frame = cards[0].findChild(QFrame, "path_summary")
+    summary_text = " ".join(lbl.text() for lbl in summary_frame.findChildren(QLabel))
+
+    assert "PVID 1" in summary_text
+    assert "VLANs 1, 30" in summary_text
+    assert "UNTAGGED" not in summary_text
+    assert "TAGGED" not in summary_text
+
+    widget.close()
+
+
+def test_upstream_widget_pvid_missing_untagged_fallback():
+    """Verify that when pvid is None, effective_pvid falls back to untagged_vlans[0] for display."""
+    from PySide6.QtWidgets import QFrame, QLabel
+    from linksight.discovery.models import Hop, PortDiagnostics, UpstreamPath
+
+    app = QApplication.instance() or QApplication([])
+    widget = UpstreamWidget()
+    widget.show()
+
+    down_port = PortDiagnostics(
+        port_id=3,
+        port_name="Port 3",
+        pvid=None,
+        allowed_vlans=[1, 30],
+        tagged_vlans=[30],
+        untagged_vlans=[1],
+        stp_state="forwarding",
+        link_speed_mbps=1000,
+        is_downlink=True,
+    )
+    hop = Hop(
+        hop_index=1,
+        hostname="Aruba-Fallback",
+        mgmt_ip="10.0.0.10",
+        status="ok",
+        ports=[down_port],
+        downlink_port=down_port,
+    )
+    path = UpstreamPath(start_ip="10.0.0.10", hops=[hop], success=True)
+    widget.show_path(path)
+
+    cards: list[HopCardWidget] = [
+        widget.cards_layout.itemAt(i).widget()
+        for i in range(widget.cards_layout.count())
+        if isinstance(widget.cards_layout.itemAt(i).widget(), HopCardWidget)
+    ]
+    summary_frame = cards[0].findChild(QFrame, "path_summary")
+    summary_text = " ".join(lbl.text() for lbl in summary_frame.findChildren(QLabel))
+
+    assert "PVID 1" in summary_text
+    assert "UNTAGGED 1" in summary_text
+    assert "TAGGED 30" in summary_text
+    assert down_port.pvid is None  # real pvid not overwritten
+    assert down_port.effective_pvid == 1
+
+    widget.close()
+
 

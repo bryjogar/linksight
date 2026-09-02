@@ -38,6 +38,9 @@ from linksight.discovery.walker import (
     OID_IF_ADMIN_STATUS,
     OID_DOT1Q_PVID,
     OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS,
+    OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS,
+    OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS,
+    OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS,
     OID_LLDP_REM_PORT_ID,
     OID_LLDP_REM_SYS_NAME,
     OID_LLDP_REM_MAN_ADDR_TABLE,
@@ -860,3 +863,179 @@ def test_walker_stp_absent_single_edge_router_neighbor():
     assert hop2.isp_gateway == "198.51.100.1"
     assert "Edge router reached: UDM-Pro" in result.edge_summary
     assert "198.51.100.1" in result.edge_summary
+
+
+def test_walker_vlan_current_egress_table_only():
+    """REGRESSION TEST: port membership present ONLY in dot1qVlanCurrentEgressPorts.
+
+    When dot1qVlanStaticEgressPorts is empty/sparse (common on Aruba/ProCurve),
+    operational membership in dot1qVlanCurrentEgressPorts must be walked and
+    included in allowed_vlans.
+    """
+    from linksight.discovery.demo import ARUBA_DEMO_MIB_CURRENT_ONLY
+
+    aruba_ip = "10.0.0.10"
+    device_mibs = {aruba_ip: ARUBA_DEMO_MIB_CURRENT_ONLY}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=aruba_ip)
+
+    assert result.success is True
+    assert len(result.hops) == 1
+    hop = result.hops[0]
+    assert hop.hostname == "Aruba-2930F"
+
+    # Find port 3
+    port3 = next((p for p in hop.ports if p.port_id == 3), None)
+    assert port3 is not None
+    # Crucial regression assertions:
+    assert 30 in port3.allowed_vlans
+    assert 1 in port3.allowed_vlans
+    assert port3.allowed_vlans == [1, 30]
+    assert port3.untagged_vlans == [1]
+    assert port3.tagged_vlans == [30]
+
+
+def test_walker_tagged_untagged_vlan_classification():
+    """Verify that egress + untagged tables classify tagged and untagged VLANs correctly.
+
+    Port in untagged table for VLAN 1 -> untagged_vlans = [1].
+    Port in egress only for VLAN 30 -> tagged_vlans = [30].
+    allowed_vlans = union = [1, 30].
+    """
+    from linksight.discovery.demo import ARUBA_DEMO_MIB
+
+    aruba_ip = "10.0.0.10"
+    device_mibs = {aruba_ip: ARUBA_DEMO_MIB}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=aruba_ip)
+
+    assert result.success is True
+    hop = result.hops[0]
+    port3 = next((p for p in hop.ports if p.port_id == 3), None)
+    assert port3 is not None
+    assert port3.pvid == 1
+    assert port3.untagged_vlans == [1]
+    assert port3.tagged_vlans == [30]
+    assert port3.allowed_vlans == [1, 30]
+
+
+def test_walker_untagged_tables_absent_graceful_degradation():
+    """Verify that when untagged tables are absent (NoSuchObject), walk degrades gracefully.
+
+    untagged_vlans = [], tagged_vlans = [], allowed_vlans = union(static, current).
+    """
+    sw_ip = "10.0.0.99"
+    # Switch with static egress on VLAN 10, current egress on VLAN 20, but NO untagged tables
+    sw_mib = {
+        OID_SYS_DESCR: "Switch Without Untagged Tables",
+        OID_SYS_NAME: "SW-NoUntagged",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001122334455"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("001122334455"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.3": 3,
+        f"{OID_IF_NAME}.3": "Port 3",
+        f"{OID_IF_HIGH_SPEED}.3": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.3": 5,
+        f"{OID_DOT1Q_PVID}.3": 10,
+        # Static egress: VLAN 10 (port 3 is bit 2: 0x20)
+        f"{OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS}.10": bytes([0x20]),
+        # Current egress: VLAN 20 (port 3 is bit 2: 0x20)
+        f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.20": bytes([0x20]),
+        # Untagged tables NOT present in MIB
+    }
+
+    device_mibs = {sw_ip: sw_mib}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    assert result.success is True
+    hop = result.hops[0]
+    port3 = next((p for p in hop.ports if p.port_id == 3), None)
+    assert port3 is not None
+    assert port3.pvid == 10
+    assert port3.untagged_vlans == []
+    assert port3.tagged_vlans == []
+    assert port3.allowed_vlans == [10, 20]  # union of static and current
+
+
+def test_walker_pvid_missing_untagged_display_fallback():
+    """Verify that when dot1qPvid is missing (None), pvid stays None and effective_pvid falls back to untagged_vlans[0]."""
+    sw_ip = "10.0.0.88"
+    # Switch where dot1qPvid is omitted/missing, but untagged table is readable
+    sw_mib = {
+        OID_SYS_DESCR: "Switch Missing PVID",
+        OID_SYS_NAME: "SW-NoPVID",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001122334466"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("001122334466"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.3": 3,
+        f"{OID_IF_NAME}.3": "Port 3",
+        f"{OID_IF_HIGH_SPEED}.3": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.3": 5,
+        # OID_DOT1Q_PVID is omitted!
+        f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.1": bytes([0x20]),
+        f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.30": bytes([0x20]),
+        f"{OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS}.0.1": bytes([0x20]),
+    }
+
+    device_mibs = {sw_ip: sw_mib}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    assert result.success is True
+    hop = result.hops[0]
+    port3 = next((p for p in hop.ports if p.port_id == 3), None)
+    assert port3 is not None
+    assert port3.pvid is None  # Never fabricated
+    assert port3.untagged_vlans == [1]
+    assert port3.tagged_vlans == [30]
+    assert port3.allowed_vlans == [1, 30]
+    assert port3.effective_pvid == 1  # Display fallback
+
+
+def test_walker_egress_static_and_current_union():
+    """Verify that a VLAN appearing in EITHER static or current egress table appears in allowed_vlans."""
+    sw_ip = "10.0.0.77"
+    sw_mib = {
+        OID_SYS_DESCR: "Switch Union Test",
+        OID_SYS_NAME: "SW-Union",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001122334477"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("001122334477"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.1": 1,
+        f"{OID_IF_NAME}.1": "Port 1",
+        f"{OID_IF_HIGH_SPEED}.1": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.1": 5,
+        f"{OID_DOT1Q_PVID}.1": 10,
+        # Static egress: VLAN 10 and VLAN 20 (port 1 is bit 0: 0x80)
+        f"{OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS}.10": bytes([0x80]),
+        f"{OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS}.20": bytes([0x80]),
+        # Current egress: VLAN 20 and VLAN 30
+        f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.20": bytes([0x80]),
+        f"{OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS}.0.30": bytes([0x80]),
+        # Static untagged: VLAN 10
+        f"{OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS}.10": bytes([0x80]),
+    }
+
+    device_mibs = {sw_ip: sw_mib}
+    factory = make_mock_client_factory(device_mibs)
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    assert result.success is True
+    port1 = next((p for p in result.hops[0].ports if p.port_id == 1), None)
+    assert port1 is not None
+    # Allowed VLANs must be the union of {10, 20} (static) and {20, 30} (current) -> [10, 20, 30]
+    assert port1.allowed_vlans == [10, 20, 30]
+    assert port1.untagged_vlans == [10]
+    assert port1.tagged_vlans == [20, 30]
+

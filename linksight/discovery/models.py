@@ -18,6 +18,8 @@ class PortDiagnostics:
     port_name: str = ""
     pvid: int | None = None
     allowed_vlans: list[int] = field(default_factory=list)
+    tagged_vlans: list[int] = field(default_factory=list)
+    untagged_vlans: list[int] = field(default_factory=list)
     stp_state: str = "unknown"  # "forwarding", "blocking", "listening", "learning", "disabled", "broken", "unknown"
     link_speed_mbps: int | None = None
     is_root_port: bool = False
@@ -31,6 +33,15 @@ class PortDiagnostics:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    @property
+    def effective_pvid(self) -> int | None:
+        """Effective PVID: dot1qPvid if set, else fallback to first untagged VLAN for display."""
+        if self.pvid is not None:
+            return self.pvid
+        if self.untagged_vlans:
+            return self.untagged_vlans[0]
+        return None
 
     @property
     def is_healthy_speed(self) -> bool:
