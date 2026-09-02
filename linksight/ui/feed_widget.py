@@ -8,6 +8,7 @@ wire (copy into Wireshark/Scapy) — the debugging ground truth.
 from __future__ import annotations
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPlainTextEdit, QLabel)
+from PySide6.QtGui import QTextCursor
 
 from ..util import hexdump
 
@@ -42,6 +43,8 @@ class FeedWidget(QWidget):
         blocks = self.feed.document().blockCount()
         if blocks > self.MAX_FRAMES * 12:
             cursor = self.feed.textCursor()
-            cursor.movePosition(cursor.Start)
-            cursor.movePosition(cursor.Down, cursor.KeepAnchor, blocks - self.MAX_FRAMES * 12)
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            cursor.movePosition(QTextCursor.MoveOperation.Down,
+                                QTextCursor.MoveMode.KeepAnchor,
+                                blocks - self.MAX_FRAMES * 12)
             cursor.removeSelectedText()
