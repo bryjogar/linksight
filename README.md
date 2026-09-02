@@ -16,7 +16,7 @@ No historical logs, no active scanning, and no background tracking — LinkSight
 
 Starting from the switch LinkSight discovers passively, **Upstream Discovery** traces the physical switch chain upstream to the network edge (core switch / STP root / default gateway router or firewall).
 
-- **Per-hop diagnostics:** Each hop provides per-port diagnostic data including PVID (native VLAN), allowed VLANs, STP port state (forwarding, blocking, learning, listening), negotiated link speed (with warnings for <1000 Mbps links), and connected neighbor identity.
+- **Path-focused hop cards & diagnostics:** Hop cards show traced path ports by default (downlink to previous hop / endpoint and uplink to next hop) with full per-port diagnostic sweeps available behind an expander (PVID, allowed VLANs, STP state, link speed, and neighbor identity).
 - **Firewall Edge & WAN Handoff:** Tracing extends through the firewall edge: querying the firewall's IF-MIB interface table and default route (0.0.0.0/0) identifies the active WAN interface, negotiated speed, operational status, and upstream ISP gateway IP. If a firewall responds to system identity queries but restricts interface or routing table walks, discovery degrades gracefully to render the edge device hop without failing the walk.
 - **STP Root Direction Rule:** Discovery walks strictly along each switch's spanning tree root port (`dot1dStpRootPort`), preventing recursion into downstream IDF switches. The walk terminates cleanly when reaching the STP root bridge or an edge router/firewall.
 - **Privacy & In-Memory Credentials:** The SNMP read community is prompted once when starting discovery, stored only in RAM for the process lifetime, and is never written to disk, configuration files, or sent to external servers.

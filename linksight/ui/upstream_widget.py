@@ -38,6 +38,39 @@ from .theme import (
 )
 
 
+def _format_speed(speed_mbps: int | None) -> tuple[str, str]:
+    """Return (text, hex_color) for link speed."""
+    if speed_mbps is None:
+        return ("—", FG_FAINT)
+    if speed_mbps >= 1000 and speed_mbps % 1000 == 0:
+        speed_str = f"{speed_mbps // 1000} Gbps"
+    else:
+        speed_str = f"{speed_mbps} Mbps"
+    color = OK if speed_mbps >= 1000 else WARN
+    return (speed_str, color)
+
+
+def _format_port_status(port: PortDiagnostics) -> tuple[str, str]:
+    """Return (status_text, hex_color) for port STP/oper status."""
+    st = port.stp_state.upper()
+    if st != "UNKNOWN":
+        if port.is_forwarding:
+            return (st, OK)
+        elif st in ("BLOCKING", "BROKEN"):
+            return (st, DANGER)
+        else:
+            return (st, WARN)
+    elif port.oper_status and port.oper_status.lower() != "unknown":
+        op = port.oper_status.upper()
+        if port.oper_status.lower() == "up":
+            return (op, OK)
+        elif port.oper_status.lower() == "down":
+            return (op, DANGER)
+        else:
+            return (op, WARN)
+    return ("—", FG_FAINT)
+
+
 class HopCardWidget(QFrame):
     """An expandable card displaying a single hop in the upstream chain."""
 
@@ -45,6 +78,9 @@ class HopCardWidget(QFrame):
         super().__init__(parent)
         self.hop = hop
         self.expanded = True
+        self.ports_expanded = False
+        self.ports_toggle_btn: QPushButton | None = None
+        self.table: QTableWidget | None = None
         self.setObjectName("panel")
         self.setStyleSheet(
             f"QFrame#panel {{ background-color: {BG_PANEL}; border: 1px solid {BORDER}; border-radius: 6px; margin-bottom: 6px; }}"
@@ -135,7 +171,19 @@ class HopCardWidget(QFrame):
             desc_lbl.setWordWrap(True)
             body_layout.addWidget(desc_lbl)
 
-        # WAN Handoff Block (Prominent WAN Interface + Speed + Oper Status + ISP Gateway)
+        # Determine path ports: downlink, uplink
+        downlink = self.hop.downlink_port or self.hop.lan_interface
+        uplink = self.hop.uplink_port or self.hop.wan_interface
+
+        # For hop 1 if downlink is unknown, check if any port has neighbor indicating endpoint
+        if downlink is None and self.hop.hop_index == 1:
+            for p in self.hop.ports:
+                if p is not uplink and p.neighbor_name:
+                    if any(k in p.neighbor_name.lower() for k in ("local-host", "endpoint", "host", "localhost")):
+                        downlink = p
+                        break
+
+        # WAN Handoff Block (Prominent WAN Interface + Speed + Oper Status + ISP Gateway for Edge devices)
         if self.hop.wan_interface or self.hop.isp_gateway:
             wan_frame = QFrame()
             wan_frame.setObjectName("wan_handoff")
@@ -156,9 +204,7 @@ class HopCardWidget(QFrame):
             wan_layout.addWidget(wan_lbl)
 
             if self.hop.wan_interface and self.hop.wan_interface.link_speed_mbps is not None:
-                spd = self.hop.wan_interface.link_speed_mbps
-                spd_str = f"{spd // 1000} Gbps" if spd >= 1000 and spd % 1000 == 0 else f"{spd} Mbps"
-                spd_color = OK if spd >= 1000 else WARN
+                spd_str, spd_color = _format_speed(self.hop.wan_interface.link_speed_mbps)
                 spd_lbl = QLabel(f"Speed: <span style='color:{spd_color}; font-family:{MONO}; font-weight:600;'>{spd_str}</span>")
             else:
                 spd_lbl = QLabel("Speed: <span style='color:#808080;'>—</span>")
@@ -183,7 +229,116 @@ class HopCardWidget(QFrame):
 
             wan_layout.addStretch(1)
             body_layout.addWidget(wan_frame)
-        elif self.hop.default_gateway:
+        elif downlink or uplink:
+            # Compact Path Summary Block (K'Nex style trace: Downlink -> Switch -> Uplink)
+            path_frame = QFrame()
+            path_frame.setObjectName("path_summary")
+            path_frame.setStyleSheet(
+                f"QFrame#path_summary {{ background-color: {BG_INPUT}; border: 1px solid {BORDER_STRONG}; border-radius: 4px; padding: 6px 10px; }}"
+            )
+            path_layout = QHBoxLayout(path_frame)
+            path_layout.setContentsMargins(8, 6, 8, 6)
+            path_layout.setSpacing(12)
+
+            badge_path = QLabel("PATH")
+            badge_path.setStyleSheet(f"color: {ACCENT}; font-weight: 700; font-size: 11px; font-family: {MONO};")
+            path_layout.addWidget(badge_path)
+
+            if downlink:
+                down_widget = QWidget()
+                down_vbox = QVBoxLayout(down_widget)
+                down_vbox.setContentsMargins(0, 0, 0, 0)
+                down_vbox.setSpacing(2)
+
+                d_name = downlink.port_name or f"Port {downlink.port_id}"
+                d_spd_str, d_spd_col = _format_speed(downlink.link_speed_mbps)
+                d_st_str, d_st_col = _format_port_status(downlink)
+                d_pvid = f"PVID {downlink.pvid}" if downlink.pvid is not None else ""
+
+                d_top_html = (
+                    f"<span style='color:{OK}; font-weight:700; font-size:10px; font-family:{MONO};'>▼ DOWNLINK</span> "
+                    f"<span style='color:{FG}; font-family:{MONO}; font-weight:700; font-size:12px;'>{d_name}</span> "
+                    f"<span style='color:{d_spd_col}; font-family:{MONO}; font-weight:600; font-size:11px;'>{d_spd_str}</span> "
+                    f"<span style='color:{d_st_col}; font-family:{MONO}; font-weight:600; font-size:11px;'>{d_st_str}</span> "
+                    f"{f'<span style=\"color:{FG_DIM}; font-size:11px;\">{d_pvid}</span>' if d_pvid else ''}"
+                )
+                d_top_lbl = QLabel(d_top_html)
+                down_vbox.addWidget(d_top_lbl)
+
+                d_parts = []
+                if downlink.neighbor_name:
+                    d_parts.append(downlink.neighbor_name)
+                if downlink.neighbor_ip:
+                    d_parts.append(f"({downlink.neighbor_ip})")
+                if downlink.neighbor_port:
+                    d_parts.append(f"on {downlink.neighbor_port}")
+                d_neigh_str = " ".join(d_parts)
+
+                if d_neigh_str:
+                    d_sub_lbl = QLabel(f"◀ {d_neigh_str}")
+                    d_sub_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
+                    down_vbox.addWidget(d_sub_lbl)
+
+                path_layout.addWidget(down_widget)
+
+            # Center Switch indicator
+            switch_name = self.hop.hostname or self.hop.mgmt_ip or "Switch"
+            if downlink and uplink:
+                center_lbl = QLabel(f"──▶ [ {switch_name} ] ──▶")
+                center_lbl.setStyleSheet(f"color: {ACCENT}; font-family: {MONO}; font-weight: 600; font-size: 11px;")
+                path_layout.addWidget(center_lbl)
+            elif downlink and not uplink:
+                root_str = " (STP Root)" if self.hop.is_stp_root else ""
+                center_lbl = QLabel(f"──▶ [ {switch_name}{root_str} ]")
+                center_lbl.setStyleSheet(f"color: {OK if self.hop.is_stp_root else ACCENT}; font-family: {MONO}; font-weight: 600; font-size: 11px;")
+                path_layout.addWidget(center_lbl)
+            elif uplink and not downlink:
+                center_lbl = QLabel(f"[ {switch_name} ] ──▶")
+                center_lbl.setStyleSheet(f"color: {ACCENT}; font-family: {MONO}; font-weight: 600; font-size: 11px;")
+                path_layout.addWidget(center_lbl)
+
+            if uplink:
+                up_widget = QWidget()
+                up_vbox = QVBoxLayout(up_widget)
+                up_vbox.setContentsMargins(0, 0, 0, 0)
+                up_vbox.setSpacing(2)
+
+                u_tag = "ROOT / UPLINK" if uplink.is_root_port else "UPLINK"
+                u_name = uplink.port_name or f"Port {uplink.port_id}"
+                u_spd_str, u_spd_col = _format_speed(uplink.link_speed_mbps)
+                u_st_str, u_st_col = _format_port_status(uplink)
+                u_pvid = f"PVID {uplink.pvid}" if uplink.pvid is not None else ""
+
+                u_top_html = (
+                    f"<span style='color:{ACCENT}; font-weight:700; font-size:10px; font-family:{MONO};'>▲ {u_tag}</span> "
+                    f"<span style='color:{FG}; font-family:{MONO}; font-weight:700; font-size:12px;'>{u_name}</span> "
+                    f"<span style='color:{u_spd_col}; font-family:{MONO}; font-weight:600; font-size:11px;'>{u_spd_str}</span> "
+                    f"<span style='color:{u_st_col}; font-family:{MONO}; font-weight:600; font-size:11px;'>{u_st_str}</span> "
+                    f"{f'<span style=\"color:{FG_DIM}; font-size:11px;\">{u_pvid}</span>' if u_pvid else ''}"
+                )
+                u_top_lbl = QLabel(u_top_html)
+                up_vbox.addWidget(u_top_lbl)
+
+                u_parts = []
+                if uplink.neighbor_name:
+                    u_parts.append(uplink.neighbor_name)
+                if uplink.neighbor_ip:
+                    u_parts.append(f"({uplink.neighbor_ip})")
+                if uplink.neighbor_port:
+                    u_parts.append(f"on {uplink.neighbor_port}")
+                u_neigh_str = " ".join(u_parts)
+
+                if u_neigh_str:
+                    u_sub_lbl = QLabel(f"▶ {u_neigh_str}")
+                    u_sub_lbl.setStyleSheet(f"color: {FG_DIM}; font-size: 11px;")
+                    up_vbox.addWidget(u_sub_lbl)
+
+                path_layout.addWidget(up_widget)
+
+            path_layout.addStretch(1)
+            body_layout.addWidget(path_frame)
+
+        if self.hop.default_gateway and not (self.hop.wan_interface or self.hop.isp_gateway):
             gw_lbl = QLabel(f"Default Gateway (L3): {self.hop.default_gateway}")
             gw_lbl.setStyleSheet(f"color: {ACCENT}; font-size: 11px; font-weight: 600; font-family: {MONO};")
             body_layout.addWidget(gw_lbl)
@@ -193,11 +348,31 @@ class HopCardWidget(QFrame):
             err_lbl.setStyleSheet(f"color: {DANGER}; font-size: 11px;")
             body_layout.addWidget(err_lbl)
 
-        # Per-port diagnostics table
+        # Per-port diagnostics table (collapsed by default behind "All N ports" toggle)
         if self.hop.ports:
-            table = QTableWidget()
-            table.setColumnCount(6)
-            table.setHorizontalHeaderLabels([
+            self.ports_expanded = False
+
+            toggle_row = QHBoxLayout()
+            toggle_row.setContentsMargins(0, 2, 0, 0)
+
+            port_count = len(self.hop.ports)
+            self.ports_toggle_btn = QPushButton(f"▶  All {port_count} ports")
+            self.ports_toggle_btn.setObjectName("ports_toggle")
+            self.ports_toggle_btn.setStyleSheet(
+                f"QPushButton#ports_toggle {{ background-color: transparent; border: 1px solid {BORDER}; "
+                f"color: {FG_DIM}; font-size: 11px; padding: 3px 8px; border-radius: 4px; text-align: left; }} "
+                f"QPushButton#ports_toggle:hover {{ background-color: {BG_INPUT}; color: {FG}; border-color: {BORDER_STRONG}; }}"
+            )
+            self.ports_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.ports_toggle_btn.clicked.connect(self._toggle_ports)
+            toggle_row.addWidget(self.ports_toggle_btn)
+            toggle_row.addStretch(1)
+            body_layout.addWidget(QWidget())  # spacer
+            body_layout.addLayout(toggle_row)
+
+            self.table = QTableWidget()
+            self.table.setColumnCount(6)
+            self.table.setHorizontalHeaderLabels([
                 "PORT",
                 "PVID",
                 "ALLOWED VLANS",
@@ -205,13 +380,13 @@ class HopCardWidget(QFrame):
                 "LINK SPEED",
                 "CONNECTED NEIGHBOR",
             ])
-            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-            table.horizontalHeader().setStretchLastSection(True)
-            table.verticalHeader().setVisible(False)
-            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-            table.setRowCount(len(self.hop.ports))
-            table.setShowGrid(True)
+            self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            self.table.horizontalHeader().setStretchLastSection(True)
+            self.table.verticalHeader().setVisible(False)
+            self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self.table.setRowCount(len(self.hop.ports))
+            self.table.setShowGrid(True)
 
             for row_idx, port in enumerate(self.hop.ports):
                 # 1. Port
@@ -230,21 +405,21 @@ class HopCardWidget(QFrame):
                 it_port.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 if port.is_root_port or port.is_uplink or (self.hop.wan_interface and port.port_id == self.hop.wan_interface.port_id):
                     it_port.setForeground(Qt.GlobalColor.cyan)
-                elif self.hop.lan_interface and port.port_id == self.hop.lan_interface.port_id:
+                elif (self.hop.lan_interface and port.port_id == self.hop.lan_interface.port_id) or port.is_downlink:
                     it_port.setForeground(Qt.GlobalColor.green)
-                table.setItem(row_idx, 0, it_port)
+                self.table.setItem(row_idx, 0, it_port)
 
                 # 2. PVID
                 pvid_str = str(port.pvid) if port.pvid is not None else "—"
                 it_pvid = QTableWidgetItem(pvid_str)
                 it_pvid.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
-                table.setItem(row_idx, 1, it_pvid)
+                self.table.setItem(row_idx, 1, it_pvid)
 
                 # 3. Allowed VLANs
                 vlans_str = ", ".join(str(v) for v in port.allowed_vlans) if port.allowed_vlans else "—"
                 it_vlans = QTableWidgetItem(vlans_str)
                 it_vlans.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                table.setItem(row_idx, 2, it_vlans)
+                self.table.setItem(row_idx, 2, it_vlans)
 
                 # 4. STP / Oper Status
                 st = port.stp_state.upper()
@@ -271,7 +446,7 @@ class HopCardWidget(QFrame):
                 it_stp = QTableWidgetItem(status_text)
                 it_stp.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
                 it_stp.setForeground(color)
-                table.setItem(row_idx, 3, it_stp)
+                self.table.setItem(row_idx, 3, it_stp)
 
                 # 5. Link Speed
                 if port.link_speed_mbps is not None:
@@ -287,7 +462,7 @@ class HopCardWidget(QFrame):
                     it_speed.setForeground(Qt.GlobalColor.yellow)
                 elif port.link_speed_mbps is not None:
                     it_speed.setForeground(Qt.GlobalColor.green)
-                table.setItem(row_idx, 4, it_speed)
+                self.table.setItem(row_idx, 4, it_speed)
 
                 # 6. Neighbor
                 neigh_parts = []
@@ -300,12 +475,20 @@ class HopCardWidget(QFrame):
                 neigh_str = " ".join(neigh_parts) if neigh_parts else "—"
                 it_neigh = QTableWidgetItem(neigh_str)
                 it_neigh.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                table.setItem(row_idx, 5, it_neigh)
+                self.table.setItem(row_idx, 5, it_neigh)
+
+                # Row height compact
+                self.table.setRowHeight(row_idx, 24)
 
             # Sizing
-            table.resizeColumnsToContents()
-            table.setMinimumHeight(min(220, 32 + len(self.hop.ports) * 26))
-            body_layout.addWidget(table)
+            self.table.resizeColumnsToContents()
+            self.table.setMinimumHeight(min(220, 32 + len(self.hop.ports) * 26))
+            self.table.setVisible(False)
+            body_layout.addWidget(self.table)
+        else:
+            self.ports_expanded = False
+            self.ports_toggle_btn = None
+            self.table = None
 
         main_layout.addWidget(self.body)
 
@@ -313,6 +496,15 @@ class HopCardWidget(QFrame):
         self.expanded = not self.expanded
         self.body.setVisible(self.expanded)
         self.toggle_btn.setText("Hide" if self.expanded else "Show")
+
+    def _toggle_ports(self):
+        self.ports_expanded = not self.ports_expanded
+        if self.table is not None:
+            self.table.setVisible(self.ports_expanded)
+        if self.ports_toggle_btn is not None:
+            port_count = len(self.hop.ports)
+            arrow = "▼" if self.ports_expanded else "▶"
+            self.ports_toggle_btn.setText(f"{arrow}  All {port_count} ports")
 
 
 class UpstreamWidget(QWidget):

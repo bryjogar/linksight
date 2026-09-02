@@ -219,7 +219,7 @@ def test_direction_rule_recursion_trap_9_idfs():
 
 
 def test_walker_multi_hop_to_firewall_edge():
-    """Verify 3-hop chain ending at an edge firewall."""
+    """Verify 3-hop chain ending at an edge firewall with downlink and uplink port identification."""
     # Access -> Core (Root) -> Edge Firewall
     access_ip = "10.0.0.3"
     core_ip = "10.0.0.2"
@@ -232,6 +232,14 @@ def test_walker_multi_hop_to_firewall_edge():
             OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("aabbcc001122"),
             OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000001a2b3c4d5e"),
             OID_DOT1D_STP_ROOT_PORT: 24,
+            f"{OID_DOT1D_BASE_PORT_IFINDEX}.1": 1,
+            f"{OID_DOT1D_STP_PORT_STATE}.1": 5,
+            f"{OID_IF_NAME}.1": "Gi1/0/1",
+            f"{OID_IF_HIGH_SPEED}.1": 1000,
+            f"{OID_DOT1Q_PVID}.1": 200,
+            f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+            f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+            f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.1.1.1.4.10.0.0.42": 1,
             f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
             f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
             f"{OID_IF_NAME}.24": "Gi1/0/24",
@@ -248,6 +256,14 @@ def test_walker_multi_hop_to_firewall_edge():
             OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000001a2b3c4d5e"),
             OID_DOT1D_STP_ROOT_PORT: 0,  # Root bridge
             OID_IP_ROUTE_NEXT_HOP_DEFAULT: fw_ip,
+            f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+            f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
+            f"{OID_IF_NAME}.24": "Gi0/24",
+            f"{OID_IF_HIGH_SPEED}.24": 1000,
+            f"{OID_DOT1Q_PVID}.24": 100,
+            f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Access-SW2",
+            f"{OID_LLDP_REM_PORT_ID}.0.24.1": "Gi1/0/24",
+            f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.24.1.1.4.10.0.0.3": 1,
         },
     }
 
@@ -257,10 +273,97 @@ def test_walker_multi_hop_to_firewall_edge():
 
     assert result.success is True
     assert len(result.hops) == 2
-    assert result.hops[0].hostname == "Access-SW2"
-    assert result.hops[1].hostname == "Core-SW1"
-    assert result.hops[1].is_stp_root is True
-    assert result.hops[1].default_gateway == fw_ip
+    hop1 = result.hops[0]
+    assert hop1.hostname == "Access-SW2"
+    assert hop1.uplink_port is not None
+    assert hop1.uplink_port.port_name == "Gi1/0/24"
+    assert hop1.uplink_port.is_uplink is True
+    assert hop1.downlink_port is not None
+    assert hop1.downlink_port.port_name == "Gi1/0/1"
+    assert hop1.downlink_port.is_downlink is True
+    assert hop1.downlink_port.neighbor_name == "Local-Host"
+
+    hop2 = result.hops[1]
+    assert hop2.hostname == "Core-SW1"
+    assert hop2.is_stp_root is True
+    assert hop2.default_gateway == fw_ip
+    assert hop2.downlink_port is not None
+    assert hop2.downlink_port.port_name == "Gi0/24"
+    assert hop2.downlink_port.is_downlink is True
+    assert hop2.downlink_port.neighbor_ip == access_ip
+    assert hop2.downlink_port.neighbor_name == "Access-SW2"
+
+
+def test_walker_switch_hop_downlink_identification():
+    """Verify that multi-hop switch walker accurately determines uplink and downlink on every hop."""
+    access_ip = "10.0.0.3"
+    core_ip = "10.0.0.2"
+
+    device_mibs = {
+        access_ip: {
+            OID_SYS_DESCR: "Cisco Catalyst 2960L",
+            OID_SYS_NAME: "Access-SW2",
+            OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("aabbcc001122"),
+            OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000001a2b3c4d5e"),
+            OID_DOT1D_STP_ROOT_PORT: 24,
+            f"{OID_DOT1D_BASE_PORT_IFINDEX}.1": 1,
+            f"{OID_DOT1D_STP_PORT_STATE}.1": 5,
+            f"{OID_IF_NAME}.1": "Gi1/0/1",
+            f"{OID_IF_HIGH_SPEED}.1": 1000,
+            f"{OID_DOT1Q_PVID}.1": 200,
+            f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "Local-Host",
+            f"{OID_LLDP_REM_PORT_ID}.0.1.1": "eth0",
+            f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.1.1.1.4.10.0.0.42": 1,
+            f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+            f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
+            f"{OID_IF_NAME}.24": "Gi1/0/24",
+            f"{OID_IF_HIGH_SPEED}.24": 1000,
+            f"{OID_DOT1Q_PVID}.24": 100,
+            f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Core-SW1",
+            f"{OID_LLDP_REM_PORT_ID}.0.24.1": "Gi0/24",
+            f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.24.1.1.4.10.0.0.2": 1,
+        },
+        core_ip: {
+            OID_SYS_DESCR: "Cisco Catalyst 2960X",
+            OID_SYS_NAME: "Core-SW1",
+            OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001a2b3c4d5e"),
+            OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000001a2b3c4d5e"),
+            OID_DOT1D_STP_ROOT_PORT: 0,
+            f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+            f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
+            f"{OID_IF_NAME}.24": "Gi0/24",
+            f"{OID_IF_HIGH_SPEED}.24": 1000,
+            f"{OID_DOT1Q_PVID}.24": 100,
+            f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Access-SW2",
+            f"{OID_LLDP_REM_PORT_ID}.0.24.1": "Gi1/0/24",
+            f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.24.1.1.4.10.0.0.3": 1,
+        },
+    }
+
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=access_ip)
+
+    assert result.success is True
+    assert len(result.hops) == 2
+
+    # Hop 1: Access switch
+    hop1 = result.hops[0]
+    assert hop1.uplink_port is not None
+    assert hop1.uplink_port.port_name == "Gi1/0/24"
+    assert hop1.uplink_port.is_uplink is True
+    assert hop1.downlink_port is not None
+    assert hop1.downlink_port.port_name == "Gi1/0/1"
+    assert hop1.downlink_port.is_downlink is True
+    assert hop1.downlink_port.neighbor_name == "Local-Host"
+
+    # Hop 2: Core switch (downlink faces Access switch hop 1)
+    hop2 = result.hops[1]
+    assert hop2.downlink_port is not None
+    assert hop2.downlink_port.port_name == "Gi0/24"
+    assert hop2.downlink_port.is_downlink is True
+    assert hop2.downlink_port.neighbor_ip == "10.0.0.3"
+    assert hop2.downlink_port.neighbor_name == "Access-SW2"
 
 
 def test_walker_firewall_edge_snmp_pass():
@@ -299,6 +402,14 @@ def test_walker_firewall_edge_snmp_pass():
             f"{OID_LLDP_REM_SYS_NAME}.0.1.1": "FW-Edge01",
             f"{OID_LLDP_REM_PORT_ID}.0.1.1": "port1",
             f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.1.1.1.4.10.0.0.1": 1,
+            f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+            f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
+            f"{OID_IF_NAME}.24": "Gi0/24",
+            f"{OID_IF_HIGH_SPEED}.24": 1000,
+            f"{OID_DOT1Q_PVID}.24": 100,
+            f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Access-SW2",
+            f"{OID_LLDP_REM_PORT_ID}.0.24.1": "Gi1/0/24",
+            f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.24.1.1.4.10.0.0.3": 1,
         },
         fw_ip: {
             OID_SYS_DESCR: "FortiGate-60F v7.2.5,build1517,230612 (GA.M)",

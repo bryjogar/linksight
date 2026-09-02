@@ -18,7 +18,9 @@ from linksight.ui.upstream_widget import UpstreamWidget, HopCardWidget
 
 
 def test_upstream_widget_render_demo_path():
-    """Verify UpstreamWidget correctly renders the multi-hop demo chain with WAN handoff."""
+    """Verify UpstreamWidget correctly renders the multi-hop demo chain with path summary, WAN handoff, and collapsed table."""
+    from PySide6.QtWidgets import QFrame, QLabel
+
     app = QApplication.instance() or QApplication([])
 
     widget = UpstreamWidget()
@@ -47,7 +49,7 @@ def test_upstream_widget_render_demo_path():
             cards.append(w)
             assert w.hop is not None
             assert w.expanded is True
-            # Test toggle
+            # Test whole-card toggle
             w._toggle_expand()
             assert w.expanded is False
             assert w.body.isHidden() is True
@@ -56,7 +58,43 @@ def test_upstream_widget_render_demo_path():
             assert not w.body.isHidden()
 
     assert card_count == 3
-    # Verify FW-Edge01 card has WAN handoff block
+
+    # 1. Hop 1 (Access-SW2): Path summary block with downlink Gi1/0/1 and uplink Gi1/0/24
+    hop1_card = cards[0]
+    hop1_summary = hop1_card.findChild(QFrame, "path_summary")
+    assert hop1_summary is not None
+    hop1_labels_text = " ".join(lbl.text() for lbl in hop1_summary.findChildren(QLabel))
+    assert "Gi1/0/1" in hop1_labels_text
+    assert "Gi1/0/24" in hop1_labels_text
+    # Table collapsed by default
+    assert hop1_card.table is not None
+    assert hop1_card.table.isHidden() is True
+    assert hop1_card.ports_toggle_btn is not None
+    assert "All 4 ports" in hop1_card.ports_toggle_btn.text()
+    # Click toggle -> expands
+    hop1_card.ports_toggle_btn.click()
+    assert hop1_card.table.isHidden() is False
+    assert "All 4 ports" in hop1_card.ports_toggle_btn.text()
+    # Click toggle again -> collapses
+    hop1_card.ports_toggle_btn.click()
+    assert hop1_card.table.isHidden() is True
+
+    # 2. Hop 2 (Core-SW1): Path summary block with downlink Gi0/24 and uplink Gi0/1
+    hop2_card = cards[1]
+    hop2_summary = hop2_card.findChild(QFrame, "path_summary")
+    assert hop2_summary is not None
+    hop2_labels_text = " ".join(lbl.text() for lbl in hop2_summary.findChildren(QLabel))
+    assert "Gi0/24" in hop2_labels_text
+    assert "Gi0/1" in hop2_labels_text
+    # Table collapsed by default
+    assert hop2_card.table is not None
+    assert hop2_card.table.isHidden() is True
+    hop2_card.ports_toggle_btn.click()
+    assert hop2_card.table.isHidden() is False
+    hop2_card.ports_toggle_btn.click()
+    assert hop2_card.table.isHidden() is True
+
+    # 3. Hop 3 (FW-Edge01): WAN handoff block and collapsed table
     fw_card = cards[2]
     assert fw_card.hop.hostname == "FW-Edge01"
     assert fw_card.hop.wan_interface is not None
@@ -64,6 +102,14 @@ def test_upstream_widget_render_demo_path():
     assert fw_card.hop.isp_gateway == "203.0.113.1"
     assert fw_card.hop.lan_interface is not None
     assert fw_card.hop.lan_interface.port_name == "lan"
+    wan_frame = fw_card.findChild(QFrame, "wan_handoff")
+    assert wan_frame is not None
+    assert fw_card.table is not None
+    assert fw_card.table.isHidden() is True
+    fw_card.ports_toggle_btn.click()
+    assert fw_card.table.isHidden() is False
+    fw_card.ports_toggle_btn.click()
+    assert fw_card.table.isHidden() is True
 
     # Test clear
     widget.clear()
@@ -170,3 +216,72 @@ def test_main_window_demo_upstream_discovery():
     finally:
         window.close()
         controller.close()
+
+
+def test_hop_card_widget_path_summary_modes():
+    """Verify HopCardWidget gracefully renders only-uplink, only-downlink, and dual-port summaries."""
+    from PySide6.QtWidgets import QFrame, QLabel
+    from linksight.discovery.models import Hop, PortDiagnostics
+
+    app = QApplication.instance() or QApplication([])
+
+    up_port = PortDiagnostics(
+        port_id=24,
+        port_name="Gi1/0/24",
+        pvid=100,
+        link_speed_mbps=1000,
+        stp_state="forwarding",
+        is_uplink=True,
+        neighbor_name="Core-SW1",
+        neighbor_ip="10.0.0.2",
+    )
+
+    down_port = PortDiagnostics(
+        port_id=1,
+        port_name="Gi1/0/1",
+        pvid=200,
+        link_speed_mbps=1000,
+        stp_state="forwarding",
+        is_downlink=True,
+        neighbor_name="Host-PC",
+    )
+
+    # Mode 1: Only Uplink (no downlink identified)
+    hop_up_only = Hop(
+        hop_index=1,
+        hostname="Switch-A",
+        mgmt_ip="10.0.0.10",
+        uplink_port=up_port,
+        ports=[up_port],
+    )
+    card1 = HopCardWidget(hop_up_only)
+    card1.show()
+    summary1 = card1.findChild(QFrame, "path_summary")
+    assert summary1 is not None
+    text1 = " ".join(lbl.text() for lbl in summary1.findChildren(QLabel))
+    assert "Gi1/0/24" in text1
+    assert "Core-SW1" in text1
+    assert "DOWNLINK" not in text1  # No dead space / noise rows
+    assert card1.table is not None
+    assert card1.table.isHidden() is True
+    card1.close()
+
+    # Mode 2: Only Downlink (STP Root bridge with no upstream uplink)
+    hop_down_only = Hop(
+        hop_index=2,
+        hostname="Switch-Root",
+        mgmt_ip="10.0.0.2",
+        is_stp_root=True,
+        downlink_port=down_port,
+        ports=[down_port],
+    )
+    card2 = HopCardWidget(hop_down_only)
+    card2.show()
+    summary2 = card2.findChild(QFrame, "path_summary")
+    assert summary2 is not None
+    text2 = " ".join(lbl.text() for lbl in summary2.findChildren(QLabel))
+    assert "Gi1/0/1" in text2
+    assert "Host-PC" in text2
+    assert "ROOT / UPLINK" not in text2  # No empty uplink block
+    card2.close()
+
