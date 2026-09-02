@@ -2203,3 +2203,101 @@ def test_text_util_direct():
     assert decode_ip_address(b"invalid_ip") is None
 
 
+
+
+def test_walker_stp_auto_follow_resolves_no_ip_root_neighbor():
+    """STP root port points at a UniFi neighbor that advertises NO management IP.
+    With a resolver supplied, the walker ARP-resolves the neighbor's IP from its
+    chassis MAC and continues to hop 2 automatically (no forced params).
+    Regression for: Aruba root port 47 -> UniFi (LLDP-silent IP) after STP fix.
+    """
+    from linksight.discovery.demo import ARUBA_STP_UPSTREAM_UNIFI_MIB, UNIFI_UPSTREAM_EDGE_MIB
+
+    aruba_ip = "10.0.0.10"
+    unifi_ip = "192.168.4.120"
+    device_mibs = {aruba_ip: ARUBA_STP_UPSTREAM_UNIFI_MIB, unifi_ip: UNIFI_UPSTREAM_EDGE_MIB}
+    factory = make_mock_client_factory(device_mibs)
+
+    def fake_resolver(port):
+        # ARP resolves the UniFi chassis MAC to its management IP
+        assert port.port_id == 47
+        assert port.neighbor_chassis == "74:83:c2:19:6d:a4"
+        return unifi_ip
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(
+        start_ip=aruba_ip,
+        endpoint_mac="00:11:22:33:44:55",
+        resolve_no_ip_neighbor=fake_resolver,
+    )
+
+    assert result.success is True
+    assert len(result.hops) == 2
+    hop1 = result.hops[0]
+    assert hop1.status == "ok"
+    assert hop1.uplink_port is not None
+    assert hop1.uplink_port.port_id == 47
+    assert hop1.uplink_port.neighbor_ip == unifi_ip
+    assert hop1.uplink_port.neighbor_name == "UniFi-Switch"
+    assert result.hops[1].hostname == "UniFi-Switch"
+    assert result.hops[1].mgmt_ip == unifi_ip
+
+
+def test_walker_stp_auto_follow_resolve_fails_surfaces_candidate():
+    """STP root port points at a no-IP UniFi neighbor but ARP resolution fails.
+    The walker must NOT dead-end as bare 'unreachable' — it surfaces the neighbor
+    as an actionable candidate so the UI can offer 'try this path'.
+    """
+    from linksight.discovery.demo import ARUBA_STP_UPSTREAM_UNIFI_MIB
+
+    aruba_ip = "10.0.0.10"
+    device_mibs = {aruba_ip: ARUBA_STP_UPSTREAM_UNIFI_MIB}
+    factory = make_mock_client_factory(device_mibs)
+
+    def failing_resolver(port):
+        return None  # ARP found nothing
+
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(
+        start_ip=aruba_ip,
+        endpoint_mac="00:11:22:33:44:55",
+        resolve_no_ip_neighbor=failing_resolver,
+    )
+
+    assert result.success is False
+    assert result.edge_type == "ambiguous"
+    assert "choose path to resolve or enter its IP" in result.edge_summary
+    hop1 = result.hops[0]
+    assert hop1.status == "ambiguous"
+    assert len(hop1.ambiguous_candidates) == 1
+    cand = hop1.ambiguous_candidates[0]
+    assert cand.port_id == 47
+    assert cand.neighbor_name == "UniFi-Switch"
+    assert cand.neighbor_ip == ""
+
+
+def test_walker_stp_no_resolver_no_identity_still_unreachable():
+    """Root port with NO neighbor identity and no resolver stays a genuine
+    unreachable stop (true dead link) — the guard must not over-degrade."""
+    aruba_ip = "10.0.0.10"
+    mock_mib = {
+        OID_SYS_DESCR: "Aruba 2930F-24G-4SFP+ Switch (JL259A), WC.16.10.0016",
+        OID_SYS_NAME: "Aruba-2930F",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000b86112233"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("7483c2196da4"),
+        OID_DOT1D_STP_ROOT_PORT: 47,
+        # Port 47 exists but has NO LLDP neighbor identity at all
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.47": 47,
+        f"{OID_IF_NAME}.47": "Port 47",
+        f"{OID_IF_HIGH_SPEED}.47": 1000,
+        f"{OID_DOT1D_STP_PORT_STATE}.47": 5,
+        f"{OID_DOT1Q_PVID}.47": 1,
+        OID_IP_ROUTE_NEXT_HOP_DEFAULT: "10.0.0.1",
+    }
+    factory = make_mock_client_factory({aruba_ip: mock_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=aruba_ip, endpoint_mac="00:11:22:33:44:55")
+
+    assert result.success is False
+    assert result.edge_type == "unreachable"
+    assert "has no management IP" in result.edge_summary

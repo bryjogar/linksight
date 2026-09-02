@@ -6,6 +6,7 @@ import ipaddress
 import sys
 import threading
 import time
+from typing import Callable, Any
 
 from PySide6.QtCore import Qt, QSize, QEvent, QTimer, QThread, Signal
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -51,6 +52,7 @@ class UpstreamWorker(QThread):
         forced_port_id: int | str | None = None,
         forced_hop_ip: str | None = None,
         forced_candidate: PortDiagnostics | None = None,
+        no_ip_resolver: Callable[..., str | None] | None = None,
     ):
         super().__init__(parent)
         self.start_ip = start_ip
@@ -63,6 +65,7 @@ class UpstreamWorker(QThread):
         self.forced_port_id = forced_port_id
         self.forced_hop_ip = forced_hop_ip
         self.forced_candidate = forced_candidate
+        self.no_ip_resolver = no_ip_resolver
         self._stop_event = threading.Event()
 
     def stop(self) -> None:
@@ -124,6 +127,7 @@ class UpstreamWorker(QThread):
                 forced_port_id=self.forced_port_id,
                 forced_hop_ip=self.forced_hop_ip,
                 forced_candidate=self.forced_candidate,
+                resolve_no_ip_neighbor=self.no_ip_resolver,
             )
             if self._stop_event.is_set():
                 self.cancelled.emit()
@@ -647,6 +651,28 @@ class MainWindow(QMainWindow):
         if self.demo and not endpoint_mac:
             endpoint_mac = "aa:bb:cc:11:22:33"
 
+        # Resolver for STP root-port neighbors that advertise no LLDP management IP.
+        # Builds a NeighborDevice from the port's chassis MAC and ARP-resolves it,
+        # exactly like the continuation-path resolver below (kept RAM-only, no state).
+        def _no_ip_port_resolver(port: PortDiagnostics) -> str | None:
+            chassis = port.neighbor_chassis if port else ""
+            if not chassis:
+                return None
+            if self.demo:
+                return "192.168.1.20"
+            active = self.iface_combo.currentData() if hasattr(self, "iface_combo") else ""
+            dev = NeighborDevice(
+                protocol="lldp",
+                source_interface=active or "",
+                chassis_id=chassis,
+                system_name=port.neighbor_name if port else "",
+                management_ips=[],
+            )
+            try:
+                return resolve_switch_mgmt_ip(dev)
+            except Exception:
+                return None
+
         self._upstream_worker = UpstreamWorker(
             start_ip,
             community,
@@ -658,6 +684,7 @@ class MainWindow(QMainWindow):
             forced_port_id=forced_port_id,
             forced_hop_ip=forced_hop_ip,
             forced_candidate=forced_candidate,
+            no_ip_resolver=_no_ip_port_resolver,
         )
         self._upstream_worker.progress.connect(self._on_discovery_progress)
         self._upstream_worker.finished.connect(self._on_discovery_finished)

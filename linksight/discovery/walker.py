@@ -241,6 +241,7 @@ class UpstreamWalker:
         forced_port_id: int | str | None = None,
         forced_hop_ip: str | None = None,
         forced_candidate: PortDiagnostics | None = None,
+        resolve_no_ip_neighbor: Callable[[PortDiagnostics], str | None] | None = None,
     ) -> UpstreamPath:
         """Walk the upstream switch chain starting at start_ip."""
         hops: list[Hop] = []
@@ -1285,16 +1286,57 @@ class UpstreamWalker:
                             )
                         break
 
-                # If switch is NOT root: look up neighbor on the root port ONLY
+                # If switch is NOT root: look up neighbor on the root port ONLY.
+                # If that neighbor did not advertise a management IP via LLDP
+                # (UniFi and other LLDP-silent-IP gear), try ARP auto-resolution
+                # from the neighbor's chassis MAC before giving up.
                 if not uplink_port_diag or not uplink_port_diag.neighbor_ip:
-                    # Check if neighbor name or port exists
-                    neigh_info = f" neighbor {uplink_port_diag.neighbor_name}" if (uplink_port_diag and uplink_port_diag.neighbor_name) else ""
-                    edge_type = "unreachable"
-                    edge_summary = (
-                        f"Walk stopped at hop {hop_index} ({sys_name or curr_ip}): "
-                        f"root port {stp_root_port}{neigh_info} has no management IP."
-                    )
-                    break
+                    resolved_ip: str | None = None
+                    if (
+                        uplink_port_diag is not None
+                        and not uplink_port_diag.neighbor_ip
+                        and uplink_port_diag.neighbor_chassis
+                        and resolve_no_ip_neighbor is not None
+                    ):
+                        try:
+                            resolved_ip = resolve_no_ip_neighbor(uplink_port_diag)
+                        except Exception:
+                            resolved_ip = None
+                        if resolved_ip:
+                            uplink_port_diag.neighbor_ip = resolved_ip
+
+                    if not uplink_port_diag or not uplink_port_diag.neighbor_ip:
+                        # Could not resolve: if the root-port neighbor still has an
+                        # identity (chassis/name/port), surface it as a candidate so
+                        # the UI can offer "try this path" (resolve or manual entry).
+                        # Only a truly bare root port (no identity at all) is unreachable.
+                        if (
+                            uplink_port_diag is not None
+                            and (
+                                uplink_port_diag.neighbor_name
+                                or uplink_port_diag.neighbor_chassis
+                                or uplink_port_diag.neighbor_port
+                            )
+                        ):
+                            if uplink_port_diag not in candidate_uplinks:
+                                candidate_uplinks.append(uplink_port_diag)
+                            edge_type = "ambiguous"
+                            edge_summary = (
+                                f"Walk stopped at hop {hop_index} ({sys_name or curr_ip}): "
+                                f"STP root port {stp_root_port} points to {uplink_port_diag.neighbor_name or uplink_port_diag.neighbor_chassis or 'neighbor'} "
+                                f"but it advertises no management IP and ARP resolution found none — choose path to resolve or enter its IP."
+                            )
+                            hop.status = "ambiguous"
+                            hop.ambiguous_candidates = list(candidate_uplinks)
+                            break
+                        neigh_info = f" neighbor {uplink_port_diag.neighbor_name}" if (uplink_port_diag and uplink_port_diag.neighbor_name) else ""
+                        edge_type = "unreachable"
+                        edge_summary = (
+                            f"Walk stopped at hop {hop_index} ({sys_name or curr_ip}): "
+                            f"root port {stp_root_port}{neigh_info} has no management IP."
+                        )
+                        hop.status = "unreachable"
+                        break
 
                 next_ip = uplink_port_diag.neighbor_ip
                 curr_ip = next_ip

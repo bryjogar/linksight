@@ -292,7 +292,7 @@ DEMO_HOPS: list[Hop] = [
 ]
 
 
-# UniFi Switch without STP BRIDGE-MIB (Variant A: upstream gateway via LLDP)
+# UniFi Switch without STP BRIDGE-MIB (Variant B: no upstream LLDP neighbor)
 UNIFI_DEMO_MIB_WITH_UPSTREAM: dict[str, any] = {
     OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
     OID_SYS_NAME: "USW-Lite-16-PoE",
@@ -328,7 +328,7 @@ UNIFI_GATEWAY_DEMO_MIB: dict[str, any] = {
     f"{OID_IP_NET_TO_MEDIA_TABLE}.3.8.192.168.1.20": "192.168.1.20",
 }
 
-# UniFi Switch without STP BRIDGE-MIB (Variant B: no upstream LLDP neighbor)
+
 UNIFI_DEMO_MIB_NO_UPSTREAM: dict[str, any] = {
     OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
     OID_SYS_NAME: "USW-Lite-16-PoE",
@@ -407,6 +407,35 @@ ARUBA_MESH_DEMO_MIB: dict[str, any] = {
     f"{OID_LLDP_REM_SYS_NAME}.0.47.1": "UniFi-Switch",
     f"{OID_LLDP_REM_PORT_ID}.0.47.1": "Port 1",
     f"{OID_LLDP_REM_CHASSIS_ID}.0.47.1": bytes.fromhex("7483c2112233"),
+}
+
+# Aruba switch MIB fixture variant: STP now reports the upstream UniFi (MAC
+# 74:83:c2:19:6d:a4) as root via root port 47 (Bryan set UniFi STP priority 4096).
+# Port 47's LLDP neighbor (UniFi-Switch) advertises NO management IP — the STP
+# auto-follow must ARP-resolve it from the chassis MAC or degrade to a candidate.
+ARUBA_STP_UPSTREAM_UNIFI_MIB: dict[str, any] = {
+    **ARUBA_DEMO_MIB,
+    OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("7483c2196da4"),
+    OID_DOT1D_STP_ROOT_PORT: 47,
+    f"{OID_DOT1D_BASE_PORT_IFINDEX}.47": 47,
+    f"{OID_IF_NAME}.47": "Port 47",
+    f"{OID_IF_HIGH_SPEED}.47": 1000,
+    f"{OID_DOT1D_STP_PORT_STATE}.47": 5,
+    f"{OID_DOT1Q_PVID}.47": 1,
+    f"{OID_LLDP_REM_SYS_NAME}.0.47.1": "UniFi-Switch",
+    f"{OID_LLDP_REM_PORT_ID}.0.47.1": "Port 1",
+    f"{OID_LLDP_REM_CHASSIS_ID}.0.47.1": bytes.fromhex("7483c2196da4"),
+}
+
+# UniFi Switch MIB (hop 2 in the ARUBA_STP_UPSTREAM_UNIFI walk): no STP MIBs,
+# no LLDP mgmt IP — the walk should stop here as the L2 edge (nothing upstream).
+UNIFI_UPSTREAM_EDGE_MIB: dict[str, any] = {
+    OID_SYS_DESCR: "UniFi Switch USW-Lite-16-PoE, Linux 4.14.222-ui-5.2",
+    OID_SYS_NAME: "UniFi-Switch",
+    OID_SYS_OBJECT_ID: "1.3.6.1.4.1.41112.1.4",
+    OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("7483c2196da4"),
+    f"{OID_IF_NAME}.1": "Port 1",
+    f"{OID_IF_HIGH_SPEED}.1": 1000,
 }
 
 UNIFI_DEMO_HOPS_WITH_UPSTREAM: list[Hop] = [
