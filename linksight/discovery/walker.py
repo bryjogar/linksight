@@ -185,6 +185,21 @@ def _is_stp_root_bridge(
     return False
 
 
+def _edge_gateway_candidates(default_gw: Any, endpoint_gateways: list[str] | None) -> list[str]:
+    """Ordered edge-probe candidates: the top switch's own default route
+    next-hop first, then the endpoint's observed gateways (fallback when the
+    switch's SNMP view hides ipRoute). Deduped; 0.0.0.0 dropped."""
+    cands: list[str] = []
+    gw = _decode_ip_address(default_gw) if default_gw else None
+    if gw and gw != "0.0.0.0":
+        cands.append(gw)
+    for g in (endpoint_gateways or []):
+        g2 = _decode_ip_address(g) if g else None
+        if g2 and g2 != "0.0.0.0" and g2 not in cands:
+            cands.append(g2)
+    return cands
+
+
 def _matches_candidate(port: PortDiagnostics, cand: PortDiagnostics) -> bool:
     """Check whether a port matches the specified forced candidate."""
     if cand.neighbor_chassis and port.neighbor_chassis:
@@ -232,7 +247,7 @@ class UpstreamWalker:
 
     def _edge_continuation(
         self,
-        default_gw: Any,
+        candidates: list[str],
         visited_ips: set[str],
         start_ip: str,
         endpoint_ip: str | None,
@@ -241,61 +256,70 @@ class UpstreamWalker:
         max_hops: int,
         sys_name: str,
         progress_callback: Callable[[str], None] | None,
-    ) -> str | None:
+    ) -> tuple[str | None, list[str]]:
         """Continue past a clean L2 top onto the edge device.
 
-        When the chain ends at an STP root / no-upstream switch, that switch's
-        own default route (ipRoute 0.0.0.0 next-hop = its management gateway)
-        is normally the edge firewall/router — and these sites enable SNMP on
-        the firewall even though it advertises no LLDP/CDP. Probe the gateway;
-        if it answers SNMP as an edge device (or a switch worth walking),
-        return its IP so the loop continues. Any failure keeps the current
-        clean termination exactly as before — never pollute a clean end.
+        When the chain ends at an STP root / no-upstream / bare-root-port
+        switch, the switch's own default route (ipRoute 0.0.0.0 next-hop = its
+        management gateway) is normally the edge firewall/router — and these
+        sites enable SNMP on the firewall even though it advertises no
+        LLDP/CDP. The endpoint's own gateway is the fallback identity.
+
+        Probes each candidate in order; if one answers SNMP as an edge device
+        (or a switch worth walking), returns (ip, []) so the loop continues.
+        Returns (None, attempted) when nothing could continue — `attempted`
+        names the probed addresses so the caller can say why it stopped.
+        Any failure keeps the current clean termination as before — never
+        pollute a clean end.
         """
+        attempted: list[str] = []
         if hop_index >= max_hops:
-            return None
-        cand = _decode_ip_address(default_gw) if default_gw else None
-        if not cand or cand == "0.0.0.0":
-            return None
-        if cand in visited_ips or cand == start_ip or cand == curr_ip or cand == (endpoint_ip or ""):
-            return None
+            return None, attempted
+        for cand in candidates:
+            cand = _decode_ip_address(cand) if cand else None
+            if not cand or cand == "0.0.0.0":
+                continue
+            if cand in visited_ips or cand == start_ip or cand == curr_ip or cand == (endpoint_ip or ""):
+                continue
+            attempted.append(cand)
 
-        client = None
-        try:
-            client = self._get_client(cand)
-            data = client.get([OID_SYS_DESCR, OID_SYS_OBJECT_ID, OID_SYS_NAME, OID_DOT1D_BASE_BRIDGE_ADDRESS])
-        except Exception:
-            return None
-        finally:
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
+            client = None
+            try:
+                client = self._get_client(cand)
+                data = client.get([OID_SYS_DESCR, OID_SYS_OBJECT_ID, OID_SYS_NAME, OID_DOT1D_BASE_BRIDGE_ADDRESS])
+            except Exception:
+                continue  # no SNMP answer — try next candidate
+            finally:
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
 
-        if not data:
-            return None
-        descr = _decode_text(data.get(OID_SYS_DESCR)) or ""
-        obj = _decode_text(data.get(OID_SYS_OBJECT_ID)) or ""
-        name = _decode_text(data.get(OID_SYS_NAME)) or ""
-        if not (descr or obj or name):
-            return None
-        probe_type = classify_device(descr, name, obj)
-        if probe_type == "unknown":
-            bridge_val = data.get(OID_DOT1D_BASE_BRIDGE_ADDRESS)
-            has_bridge = bridge_val is not None and not isinstance(
-                bridge_val, (NoSuchObject, NoSuchInstance, EndOfMibView)
-            )
-            if has_bridge:
-                probe_type = "switch"  # bridge MIB present: real switch evidence
-            else:
-                return None  # no switch/edge signature — keep the clean end
-        if progress_callback:
-            progress_callback(
-                f"{sys_name or curr_ip} is the L2 top — gateway {cand} answers SNMP "
-                f"({name or probe_type}); walking it…"
-            )
-        return cand
+            if not data:
+                continue
+            descr = _decode_text(data.get(OID_SYS_DESCR)) or ""
+            obj = _decode_text(data.get(OID_SYS_OBJECT_ID)) or ""
+            name = _decode_text(data.get(OID_SYS_NAME)) or ""
+            if not (descr or obj or name):
+                continue
+            probe_type = classify_device(descr, name, obj)
+            if probe_type == "unknown":
+                bridge_val = data.get(OID_DOT1D_BASE_BRIDGE_ADDRESS)
+                has_bridge = bridge_val is not None and not isinstance(
+                    bridge_val, (NoSuchObject, NoSuchInstance, EndOfMibView)
+                )
+                if has_bridge:
+                    probe_type = "switch"  # bridge MIB present: real switch evidence
+                else:
+                    continue  # no switch/edge signature — try next candidate
+            if progress_callback:
+                progress_callback(
+                    f"{sys_name or curr_ip} is the L2 top — gateway {cand} answers SNMP "
+                    f"({name or probe_type}); walking it…"
+                )
+            return cand, []
+        return None, attempted
 
     def walk(
         self,
@@ -309,6 +333,7 @@ class UpstreamWalker:
         forced_hop_ip: str | None = None,
         forced_candidate: PortDiagnostics | None = None,
         resolve_no_ip_neighbor: Callable[[PortDiagnostics], str | None] | None = None,
+        endpoint_gateways: list[str] | None = None,
     ) -> UpstreamPath:
         """Walk the upstream switch chain starting at start_ip."""
         hops: list[Hop] = []
@@ -1388,8 +1413,9 @@ class UpstreamWalker:
                         # Clean L2 top. The root switch's default route points
                         # at the edge (firewall/router); sites enable SNMP there
                         # even though it advertises no LLDP — walk it.
-                        edge_next = self._edge_continuation(
-                            default_gw, visited_ips, start_ip, endpoint_ip,
+                        edge_next, gw_attempted = self._edge_continuation(
+                            _edge_gateway_candidates(default_gw, endpoint_gateways),
+                            visited_ips, start_ip, endpoint_ip,
                             curr_ip, hop_index, max_hops, sys_name or "", progress_callback,
                         )
                         if edge_next is not None:
@@ -1399,6 +1425,8 @@ class UpstreamWalker:
                         edge_type = "stp_root"
                         gw_text = f", Gateway: {default_gw}" if default_gw else ""
                         edge_summary = f"L2 STP Root reached: {sys_name or curr_ip} ({curr_ip}){gw_text}"
+                        if gw_attempted:
+                            edge_summary += f" (edge gateway {', '.join(gw_attempted)} did not answer SNMP)"
                         break
 
                 if not stp_present:
@@ -1406,8 +1434,9 @@ class UpstreamWalker:
                         # No upstream neighbor visible via LLDP — but the
                         # switch's own default route may still point at the
                         # edge firewall/router (SNMP-enabled, LLDP-silent).
-                        edge_next = self._edge_continuation(
-                            default_gw, visited_ips, start_ip, endpoint_ip,
+                        edge_next, gw_attempted = self._edge_continuation(
+                            _edge_gateway_candidates(default_gw, endpoint_gateways),
+                            visited_ips, start_ip, endpoint_ip,
                             curr_ip, hop_index, max_hops, sys_name or "", progress_callback,
                         )
                         if edge_next is not None:
@@ -1419,6 +1448,8 @@ class UpstreamWalker:
                             f"No upstream neighbor visible from {sys_name or curr_ip} ({curr_ip}) "
                             f"via LLDP — this switch appears to be the network edge."
                         )
+                        if gw_attempted:
+                            edge_summary += f" (edge gateway {', '.join(gw_attempted)} did not answer SNMP)"
                         break
                     elif candidate_uplinks and uplink_port_diag is None:
                         edge_type = "ambiguous"
@@ -1496,8 +1527,9 @@ class UpstreamWalker:
                         # edge) and ARP found no IP. The switch's own mgmt
                         # gateway is normally that edge device — probe it
                         # before declaring the walk unreachable.
-                        edge_next = self._edge_continuation(
-                            default_gw, visited_ips, start_ip, endpoint_ip,
+                        edge_next, gw_attempted = self._edge_continuation(
+                            _edge_gateway_candidates(default_gw, endpoint_gateways),
+                            visited_ips, start_ip, endpoint_ip,
                             curr_ip, hop_index, max_hops, sys_name or "", progress_callback,
                         )
                         if edge_next is not None:
@@ -1510,6 +1542,8 @@ class UpstreamWalker:
                             f"Walk stopped at hop {hop_index} ({sys_name or curr_ip}): "
                             f"root port {stp_root_port}{neigh_info} has no management IP."
                         )
+                        if gw_attempted:
+                            edge_summary += f" (edge gateway {', '.join(gw_attempted)} did not answer SNMP)"
                         hop.status = "unreachable"
                         break
 

@@ -53,6 +53,7 @@ class UpstreamWorker(QThread):
         forced_hop_ip: str | None = None,
         forced_candidate: PortDiagnostics | None = None,
         no_ip_resolver: Callable[..., str | None] | None = None,
+        endpoint_gateways: list[str] | None = None,
     ):
         super().__init__(parent)
         self.start_ip = start_ip
@@ -66,6 +67,7 @@ class UpstreamWorker(QThread):
         self.forced_hop_ip = forced_hop_ip
         self.forced_candidate = forced_candidate
         self.no_ip_resolver = no_ip_resolver
+        self.endpoint_gateways = endpoint_gateways or []
         self._stop_event = threading.Event()
 
     def stop(self) -> None:
@@ -128,6 +130,7 @@ class UpstreamWorker(QThread):
                 forced_hop_ip=self.forced_hop_ip,
                 forced_candidate=self.forced_candidate,
                 resolve_no_ip_neighbor=self.no_ip_resolver,
+                endpoint_gateways=self.endpoint_gateways,
             )
             if self._stop_event.is_set():
                 self.cancelled.emit()
@@ -758,6 +761,7 @@ class MainWindow(QMainWindow):
             forced_hop_ip=forced_hop_ip,
             forced_candidate=forced_candidate,
             no_ip_resolver=_no_ip_port_resolver,
+            endpoint_gateways=list(self.controller.network.get("gateways", []) or []),
         )
         self._upstream_worker.progress.connect(self._on_discovery_progress)
         self._upstream_worker.finished.connect(self._on_discovery_finished)

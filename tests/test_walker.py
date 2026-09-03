@@ -2702,3 +2702,64 @@ def test_walker_bare_root_port_no_gateway_keeps_unreachable():
     assert result.hops[-1].status == "unreachable"
     assert result.edge_type == "unreachable"
     assert "has no management IP" in result.edge_summary
+
+
+def test_walker_stp_root_endpoint_gateway_fallback_walks_firewall():
+    """Root switch whose SNMP view hides ipRoute (no default_gw) still reaches
+    the firewall when the endpoint's own gateway is passed as fallback."""
+    core_ip = "10.0.0.2"
+    fw_ip = "10.0.0.1"
+
+    core_mib = _bare_root_port_core_mib("10.0.0.9")  # bogus switch default gw
+    # Simulate SNMP view hiding the route table: probe-visible default gone
+    del core_mib[OID_IP_ROUTE_NEXT_HOP_DEFAULT]
+    # Make core a CLEAN STP root (root port 0, self root) so the clean-root
+    # termination path is exercised with the endpoint-gateway fallback
+    core_mib[OID_DOT1D_STP_ROOT_PORT] = 0
+    core_mib[OID_DOT1D_STP_ROOT_BRIDGE] = core_mib[OID_DOT1D_BASE_BRIDGE_ADDRESS]
+
+    device_mibs = {core_ip: core_mib, fw_ip: _fw_mib(hostname="STORE-FW")}
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=core_ip, endpoint_gateways=[fw_ip])
+
+    assert result.success is True
+    assert len(result.hops) == 2, f"Expected core→firewall, got {len(result.hops)}"
+    fw_hop = result.hops[-1]
+    assert fw_hop.mgmt_ip == fw_ip
+    assert fw_hop.device_type == "firewall"
+    assert fw_hop.status == "router_reached"
+    assert result.edge_type == "firewall"
+
+
+def test_walker_failed_edge_probe_names_gateway_in_summary():
+    """When the edge gateway exists but does not answer SNMP, the summary says
+    so — the field engineer can see it was probed (and why the walk stopped)."""
+    core_ip = "10.0.0.2"
+    fw_ip = "10.0.0.1"  # not in device_mibs → times out
+
+    device_mibs = {core_ip: _bare_root_port_core_mib(fw_ip)}
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=core_ip)
+
+    assert result.hops[-1].status == "unreachable"
+    assert fw_ip in result.edge_summary
+    assert "did not answer SNMP" in result.edge_summary
+
+
+def test_walker_failed_probe_with_endpoint_gateways_names_both():
+    """Multiple failed candidates (switch default gw + endpoint gateway) are
+    all named, so an unreachable edge is diagnosable at a glance."""
+    core_ip = "10.0.0.2"
+    switch_gw = "10.0.0.1"
+    endpoint_gw = "10.0.1.1"  # not in device_mibs either
+
+    device_mibs = {core_ip: _bare_root_port_core_mib(switch_gw)}
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=core_ip, endpoint_gateways=[endpoint_gw])
+
+    assert result.hops[-1].status == "unreachable"
+    assert switch_gw in result.edge_summary
+    assert endpoint_gw in result.edge_summary
