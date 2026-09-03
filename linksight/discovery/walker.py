@@ -1491,6 +1491,19 @@ class UpstreamWalker:
                             hop.status = "ambiguous"
                             hop.ambiguous_candidates = list(candidate_uplinks)
                             break
+                        # Bare root port: STP says something is upstream but
+                        # nothing advertised it (LLDP-silent firewall at the
+                        # edge) and ARP found no IP. The switch's own mgmt
+                        # gateway is normally that edge device — probe it
+                        # before declaring the walk unreachable.
+                        edge_next = self._edge_continuation(
+                            default_gw, visited_ips, start_ip, endpoint_ip,
+                            curr_ip, hop_index, max_hops, sys_name or "", progress_callback,
+                        )
+                        if edge_next is not None:
+                            curr_ip = edge_next
+                            hop_index += 1
+                            continue
                         neigh_info = f" neighbor {uplink_port_diag.neighbor_name}" if (uplink_port_diag and uplink_port_diag.neighbor_name) else ""
                         edge_type = "unreachable"
                         edge_summary = (

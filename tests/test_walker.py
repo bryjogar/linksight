@@ -2629,3 +2629,76 @@ def test_walker_stp_root_gateway_non_edge_snmp_host_ignored():
     assert len(result.hops) == 2  # no pollution from the non-edge gateway
     assert result.edge_type == "stp_root"
     assert result.hops[-1].hostname == "Core-SW1"
+
+
+def _bare_root_port_core_mib(gw_ip):
+    """FBCC repro: core switch that is NOT STP root per its MIB (root port
+    4096 toward an LLDP-silent upstream), no LLDP rows, mgmt default route
+    pointing at the firewall. Mirrors the field report verbatim."""
+    return {
+        OID_SYS_DESCR: "Allied Telesis AT-x930-28GTX",
+        OID_SYS_NAME: "FBCC-MDF-Core",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("0012345678ab"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("8000c8d9e0f1a2"),  # different = not root
+        OID_DOT1D_STP_ROOT_PORT: 4096,
+        OID_IP_ROUTE_NEXT_HOP_DEFAULT: gw_ip,
+    }
+
+
+def test_walker_bare_root_port_gateway_silent_firewall_walked():
+    """Field repro (FBCC): 'root port 4096 has no management IP' must now
+    continue onto the SNMP-enabled firewall via the core's mgmt gateway."""
+    core_ip = "10.0.0.2"
+    fw_ip = "10.0.0.1"
+
+    device_mibs = {
+        core_ip: _bare_root_port_core_mib(fw_ip),
+        fw_ip: _fw_mib(hostname="FBCC-FW"),
+    }
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=core_ip)
+
+    assert result.success is True
+    assert len(result.hops) == 2, f"Expected core→firewall, got {len(result.hops)}"
+    fw_hop = result.hops[-1]
+    assert fw_hop.mgmt_ip == fw_ip
+    assert fw_hop.hostname == "FBCC-FW"
+    assert fw_hop.device_type == "firewall"
+    assert fw_hop.status == "router_reached"
+    assert result.edge_type == "firewall"
+    assert "Edge firewall reached" in result.edge_summary
+
+
+def test_walker_bare_root_port_gateway_unresponsive_keeps_unreachable():
+    """Regression: bare root port + gateway that does NOT answer SNMP must
+    keep the exact old termination (unreachable, same summary)."""
+    core_ip = "10.0.0.2"
+    fw_ip = "10.0.0.1"  # not in device_mibs → times out
+
+    device_mibs = {core_ip: _bare_root_port_core_mib(fw_ip)}
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=core_ip)
+
+    assert len(result.hops) == 1
+    assert result.hops[-1].status == "unreachable"
+    assert result.edge_type == "unreachable"
+    assert "root port 4096 has no management IP" in result.edge_summary
+
+
+def test_walker_bare_root_port_no_gateway_keeps_unreachable():
+    """Regression: bare root port with NO default route at all keeps the old
+    unreachable termination (no probe possible, nothing appended)."""
+    core_ip = "10.0.0.2"
+    mib = _bare_root_port_core_mib("10.0.0.1")
+    del mib[OID_IP_ROUTE_NEXT_HOP_DEFAULT]
+    device_mibs = {core_ip: mib}
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=core_ip)
+
+    assert len(result.hops) == 1
+    assert result.hops[-1].status == "unreachable"
+    assert result.edge_type == "unreachable"
+    assert "has no management IP" in result.edge_summary
