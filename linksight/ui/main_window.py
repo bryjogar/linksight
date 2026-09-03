@@ -874,14 +874,25 @@ class MainWindow(QMainWindow):
             except ValueError:
                 QMessageBox.warning(self, "LinkSight", "That is not a valid IPv4 address.")
                 return
-            start_ip = getattr(self, "_current_walk_ip", "") or self.switch_widget._current_mgmt_ip
+            hops_list = list(getattr(path, "hops", []) or [])
+            # Resume from the LAST SUCCESSFUL hop: the one whose uplink points
+            # at the switch we're trying to reach. Restarting from the original
+            # start replays the same failing selection (forced_hop_ip never
+            # matches) — the manual IP never gets used.
+            resume_hop = None
+            if len(hops_list) >= 2 and hops_list[-1].status in ("unreachable", "timeout", "auth_failed"):
+                resume_hop = hops_list[-2]
+            start_ip = (
+                (resume_hop.mgmt_ip if resume_hop and resume_hop.mgmt_ip else "")
+                or (getattr(self, "_current_walk_ip", "") or self.switch_widget._current_mgmt_ip)
+            )
             if not start_ip:
                 return
             self._on_upstream_requested(
                 start_ip,
                 forced_next_ip=candidate_ip,
                 forced_port_id=port_id,
-                forced_hop_ip=last.mgmt_ip,
+                forced_hop_ip=(resume_hop.mgmt_ip if resume_hop else last.mgmt_ip),
                 forced_candidate=cand,
             )
         except Exception:

@@ -309,13 +309,18 @@ class UpstreamWalker:
                         response_time_ms=(time.perf_counter() - t0) * 1000,
                     )
                     # Keep the identity that led to this address (previous hop's
-                    # uplink candidate) so the UI can offer the manual-IP modal
-                    # once every advertised address has failed.
+                    # uplink candidate + any other ambiguous candidates) so the
+                    # UI can offer the manual-IP modal or alternate candidate
+                    # buttons once every advertised address has failed.
                     prev_hop = hops[-1] if hops else None
-                    prev_uplink = prev_hop.uplink_port if prev_hop else None
-                    if prev_uplink is not None:
-                        hop.uplink_port = prev_uplink
-                        hop.ambiguous_candidates = [prev_uplink]
+                    if prev_hop is not None:
+                        ctx_cands = list(getattr(prev_hop, "ambiguous_candidates", None) or [])
+                        prev_uplink = prev_hop.uplink_port
+                        if prev_uplink is not None and prev_uplink not in ctx_cands:
+                            ctx_cands.insert(0, prev_uplink)
+                        if ctx_cands:
+                            hop.uplink_port = prev_uplink or ctx_cands[0]
+                            hop.ambiguous_candidates = ctx_cands
                     hops.append(hop)
                     edge_type = status
                     if is_auth:
