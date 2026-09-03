@@ -2473,3 +2473,159 @@ def test_walker_lldp_captures_ipv6_and_ipv4_addresses():
         f"IPv6 missing: {unifi_port.neighbor_ips}"
     # Preferred remains the IPv4 management address
     assert unifi_port.neighbor_ip == v4
+
+
+def _fw_mib(hostname="EDGE-FW"):
+    """A minimal SNMP-enabled firewall MIB (FortiGate-flavored): WAN+LAN ifaces,
+    default route via wan1, no LLDP rows — the silent-edge case."""
+    return {
+        OID_SYS_DESCR: "FortiGate-100D v7.0.10",
+        OID_SYS_NAME: hostname,
+        OID_SYS_OBJECT_ID: "1.3.6.1.4.1.12356.101.1.100",
+        f"{OID_IF_NAME}.1": "wan1",
+        f"{OID_IF_NAME}.2": "internal",
+        f"{OID_IF_HIGH_SPEED}.1": 1000,
+        f"{OID_IF_HIGH_SPEED}.2": 1000,
+        f"{OID_IF_OPER_STATUS}.1": 1,
+        f"{OID_IF_OPER_STATUS}.2": 1,
+        f"{OID_IF_ADMIN_STATUS}.1": 1,
+        f"{OID_IF_ADMIN_STATUS}.2": 1,
+        OID_IP_ROUTE_NEXT_HOP_DEFAULT: "203.0.113.1",
+        OID_IP_ROUTE_IF_INDEX_DEFAULT: 1,
+    }
+
+
+def test_walker_stp_root_gateway_silent_firewall_is_walked():
+    """Clean STP root whose mgmt default route points at an LLDP-silent,
+    SNMP-enabled firewall → the walk continues onto the firewall."""
+    access_ip = "10.0.0.3"
+    core_ip = "10.0.0.2"
+    fw_ip = "10.0.0.1"
+
+    device_mibs = {
+        access_ip: {
+            OID_SYS_DESCR: "Cisco Catalyst 2960L",
+            OID_SYS_NAME: "Access-SW2",
+            OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("aabbcc001122"),
+            OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("800000001a2b3c4d5e"),
+            OID_DOT1D_STP_ROOT_PORT: 24,
+            f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+            f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
+            f"{OID_IF_NAME}.24": "Gi1/0/24",
+            f"{OID_IF_HIGH_SPEED}.24": 1000,
+            f"{OID_DOT1Q_PVID}.24": 100,
+            f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Core-SW1",
+            f"{OID_LLDP_REM_PORT_ID}.0.24.1": "Gi0/24",
+            f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.24.1.1.4.10.0.0.2": 1,
+        },
+        core_ip: {
+            OID_SYS_DESCR: "Cisco Catalyst 2960X",
+            OID_SYS_NAME: "Core-SW1",
+            OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001a2b3c4d5e"),
+            OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("800000001a2b3c4d5e"),
+            OID_DOT1D_STP_ROOT_PORT: 0,  # STP root
+            OID_IP_ROUTE_NEXT_HOP_DEFAULT: fw_ip,  # mgmt gateway = firewall
+            f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+            f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
+            f"{OID_IF_NAME}.24": "Gi0/24",
+            f"{OID_IF_HIGH_SPEED}.24": 1000,
+            f"{OID_DOT1Q_PVID}.24": 100,
+            f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Access-SW2",
+            f"{OID_LLDP_REM_PORT_ID}.0.24.1": "Gi1/0/24",
+            f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.24.1.1.4.10.0.0.3": 1,
+        },
+        fw_ip: _fw_mib(),
+    }
+
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=access_ip)
+
+    assert result.success is True
+    assert len(result.hops) == 3, f"Expected access→core→firewall, got {len(result.hops)}"
+    fw_hop = result.hops[-1]
+    assert fw_hop.mgmt_ip == fw_ip
+    assert fw_hop.hostname == "EDGE-FW"
+    assert fw_hop.device_type == "firewall"
+    assert fw_hop.status == "router_reached"
+    assert result.edge_type == "firewall"
+    # WAN port identified via default route; LAN via name fallback
+    assert fw_hop.wan_interface is not None
+    assert fw_hop.wan_interface.port_name == "wan1"
+    assert fw_hop.wan_interface.neighbor_ip == "203.0.113.1"
+    assert fw_hop.lan_interface is not None
+    assert fw_hop.lan_interface.port_name == "internal"
+    # The firewall hop must not be classified as a switch hop
+    assert "Core-MDF" not in fw_hop.hostname
+
+
+def test_walker_no_lldp_switch_gateway_silent_firewall_is_walked():
+    """A switch with no STP MIB and no LLDP neighbors (no_upstream) still
+    reaches the SNMP-enabled firewall via its default gateway."""
+    sw_ip = "10.0.5.2"
+    fw_ip = "10.0.5.1"
+
+    device_mibs = {
+        sw_ip: {
+            OID_SYS_DESCR: "Allied Telesis AT-x510-28GTX",
+            OID_SYS_NAME: "SW-EDGE",
+            OID_IP_ROUTE_NEXT_HOP_DEFAULT: fw_ip,
+        },
+        fw_ip: _fw_mib(hostname="STORE-FW"),
+    }
+
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    assert result.success is True
+    assert len(result.hops) == 2
+    fw_hop = result.hops[-1]
+    assert fw_hop.mgmt_ip == fw_ip
+    assert fw_hop.hostname == "STORE-FW"
+    assert fw_hop.device_type == "firewall"
+    assert fw_hop.status == "router_reached"
+    assert result.edge_type == "firewall"
+
+
+def test_walker_stp_root_gateway_non_edge_snmp_host_ignored():
+    """If the root switch's gateway answers SNMP but is NOT an edge/switch
+    (e.g., a server), the clean stp_root end must be preserved unchanged."""
+    access_ip = "10.0.0.3"
+    core_ip = "10.0.0.2"
+    gw_ip = "10.0.0.1"
+
+    device_mibs = {
+        access_ip: {
+            OID_SYS_DESCR: "Cisco Catalyst 2960L",
+            OID_SYS_NAME: "Access-SW2",
+            OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("aabbcc001122"),
+            OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("800000001a2b3c4d5e"),
+            OID_DOT1D_STP_ROOT_PORT: 24,
+            f"{OID_DOT1D_BASE_PORT_IFINDEX}.24": 24,
+            f"{OID_DOT1D_STP_PORT_STATE}.24": 5,
+            f"{OID_IF_NAME}.24": "Gi1/0/24",
+            f"{OID_LLDP_REM_SYS_NAME}.0.24.1": "Core-SW1",
+            f"{OID_LLDP_REM_MAN_ADDR_TABLE}.3.0.24.1.1.4.10.0.0.2": 1,
+        },
+        core_ip: {
+            OID_SYS_DESCR: "Cisco Catalyst 2960X",
+            OID_SYS_NAME: "Core-SW1",
+            OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("001a2b3c4d5e"),
+            OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("800000001a2b3c4d5e"),
+            OID_DOT1D_STP_ROOT_PORT: 0,
+            OID_IP_ROUTE_NEXT_HOP_DEFAULT: gw_ip,
+        },
+        gw_ip: {
+            OID_SYS_DESCR: "Generic Print Server 3000",
+            OID_SYS_NAME: "PRINTSRV",
+        },
+    }
+
+    factory = make_mock_client_factory(device_mibs)
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=access_ip)
+
+    assert len(result.hops) == 2  # no pollution from the non-edge gateway
+    assert result.edge_type == "stp_root"
+    assert result.hops[-1].hostname == "Core-SW1"
