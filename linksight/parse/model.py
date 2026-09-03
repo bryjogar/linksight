@@ -10,7 +10,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-from ..text_util import decode_text as _decode_text, is_printable_text
+from ..text_util import decode_text as _decode_text, decode_ip_address as _decode_ip_address, is_printable_text
 
 
 @dataclass
@@ -47,6 +47,16 @@ class NeighborDevice:
                     setattr(self, attr, "")
                 else:
                     setattr(self, attr, val.strip())
+
+        # Management addresses: IPv4 only (walks are IPv4-only). Filter even
+        # when the caller supplied the list at construction.
+        if isinstance(self.management_ips, (list, tuple)):
+            cleaned: list[str] = []
+            for ip in self.management_ips:
+                dec = _decode_ip_address(ip)
+                if dec and ":" not in dec and dec not in cleaned:
+                    cleaned.append(dec)
+            self.management_ips = cleaned
 
     @property
     def key(self) -> tuple[str, str, str, str]:

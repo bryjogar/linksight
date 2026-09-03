@@ -96,10 +96,9 @@ def _mgmt_addrs(payload: bytes) -> list[str]:
             break
         subtype = payload[off + 1]
         addr = payload[off + 2 : off + 1 + alen]
-        if subtype == 1 and len(addr) == 4:  # IPv4
+        if subtype == 1 and len(addr) == 4:  # IPv4 — walks are IPv4-only
             out.append(".".join(str(x) for x in addr))
-        elif subtype == 2 and len(addr) == 16:  # IPv6
-            out.append(_ipv6(addr))
+        # IPv6 management addresses are intentionally ignored (IPv4-only walks).
         # skip address; then iface_subtype(1) + iface_num(4) + oid_len(1) + oid
         off += 1 + alen
         if off + 6 > len(payload):

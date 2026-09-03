@@ -308,6 +308,14 @@ class UpstreamWalker:
                         error_message=str(e),
                         response_time_ms=(time.perf_counter() - t0) * 1000,
                     )
+                    # Keep the identity that led to this address (previous hop's
+                    # uplink candidate) so the UI can offer the manual-IP modal
+                    # once every advertised address has failed.
+                    prev_hop = hops[-1] if hops else None
+                    prev_uplink = prev_hop.uplink_port if prev_hop else None
+                    if prev_uplink is not None:
+                        hop.uplink_port = prev_uplink
+                        hop.ambiguous_candidates = [prev_uplink]
                     hops.append(hop)
                     edge_type = status
                     if is_auth:
@@ -1401,7 +1409,7 @@ class UpstreamWalker:
                     ip for ip in (uplink_port_diag.neighbor_ips or [])
                     if ip != uplink_port_diag.neighbor_ip and ":" not in ip
                 ]
-                pending_alt_ips = alt_ips[:3]
+                pending_alt_ips = alt_ips  # walk every advertised IPv4 before giving up
                 next_ip = uplink_port_diag.neighbor_ip
                 curr_ip = next_ip
                 hop_index += 1

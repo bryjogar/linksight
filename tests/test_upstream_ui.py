@@ -241,7 +241,8 @@ def test_switch_info_widget_upstream_button():
     assert widget._current_mgmt_ip == "10.10.10.1"
     assert widget.upstream_btn.toolTip() == "Walk upstream switches starting from 10.10.10.1"
 
-    # 3c. IPv6-only (link-local) device: no walkable IP, button prompts for manual entry
+    # 3c. IPv6-only device: model filters IPv6 at construction (IPv4-only
+    # walks), so the widget sees no management IP and prompts for manual entry
     dev_v6_only = NeighborDevice(
         protocol="lldp",
         source_interface="eth0",
@@ -250,9 +251,10 @@ def test_switch_info_widget_upstream_button():
         port_id="Gi0/2",
     )
     widget.show_device(dev_v6_only)
+    assert dev_v6_only.management_ips == []
     assert widget._current_mgmt_ip == ""
     assert widget.upstream_btn.isEnabled() is True
-    assert "No IPv4 management IP" in widget.upstream_btn.toolTip()
+    assert "No management IP advertised" in widget.upstream_btn.toolTip()
 
     # 4. Setting management IP manually updates widget state
     widget.set_management_ip("192.168.1.50")

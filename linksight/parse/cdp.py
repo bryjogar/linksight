@@ -87,8 +87,7 @@ def _addresses(payload: bytes) -> list[str]:
         # NLPID 0xcc = IP
         if ptype == 1 and plen == 1 and proto == b"\xcc" and alen == 4:
             out.append(".".join(str(x) for x in addr))
-        elif ptype == 1 and plen == 1 and proto == b"\xcc" and alen == 16:
-            out.append(_ipv6(addr))
+        # IPv6 (alen 16) intentionally ignored — walks are IPv4-only.
     return out
 
 

@@ -845,9 +845,9 @@ class MainWindow(QMainWindow):
                 cand = up
             else:
                 cand = candidates[0]
-            # Already reachable? (edge cases where neighbor_ip survived)
-            if cand.neighbor_ip:
-                return
+            # The advertised IP(s) already failed (status unreachable/timeout);
+            # offer manual entry regardless so the engineer can supply the
+            # correct management address.
             name = cand.neighbor_name or cand.neighbor_chassis or "switch"
             port_id = cand.port_id
             # Skip auto-modal if this exact hop was already asked (avoid loops)
@@ -857,7 +857,7 @@ class MainWindow(QMainWindow):
             self._last_stall_prompt = ask_key
             prompt_label = (
                 f"LinkSight could not reach the next switch: {name}.\n"
-                "It did not advertise a reachable management IP.\n\n"
+                "Its advertised management IP(s) did not respond.\n\n"
                 "Enter the switch management IPv4 address to continue:"
             )
             ip_in, ok = QInputDialog.getText(
