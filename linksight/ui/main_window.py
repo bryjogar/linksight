@@ -194,11 +194,13 @@ class ArpResolveWorker(QThread):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, controller: AppController, demo: bool = False, state_provider=None):
+    def __init__(self, controller: AppController, demo: bool = False, state_provider=None,
+                 init_hook: Callable[[str, int], None] | None = None):
         super().__init__()
         self.controller = controller
         self.demo = demo
         self._state_provider = state_provider
+        self._init_hook = init_hook  # launch-progress callback (splash screen)
         self._session_community: str | None = None  # RAM-only process lifetime
         self._current_walk_ip: str = ""
         self._upstream_worker: UpstreamWorker | None = None
@@ -213,6 +215,8 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._setup_statusbar()
+        if self._init_hook is not None:
+            self._init_hook("Enumerating wired interfaces…", 35)
 
         # wiring
         self.controller.device_seen.connect(self._on_device)
@@ -237,9 +241,13 @@ class MainWindow(QMainWindow):
         # capture starts automatically
         self._start()
         self._sync_capture_ui()
+        if self._init_hook is not None:
+            self._init_hook("Starting capture engine…", 70)
 
         # link-state and interface watcher
         self._setup_watcher()
+        if self._init_hook is not None:
+            self._init_hook("Loading interface monitor…", 95)
 
     # ── UI construction ──
 
