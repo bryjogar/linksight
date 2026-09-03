@@ -11,6 +11,7 @@ extracts to a temp dir on each run — slower to start (5-15s) but the file
 can be pushed to a client device by a remote-tool that only moves one file.
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -70,10 +71,21 @@ def main():
     # placed the folder build + zip there; we only add our single exe.
 
     print("\n[3/3] Running PyInstaller (onefile)...")
-    cmd = [sys.executable, "-m", "PyInstaller", str(spec), "--noconfirm"]
-    result = subprocess.run(cmd, cwd=PROJECT_DIR)
 
-    if result.returncode != 0:
+    def run_pyinstaller(no_splash: bool) -> int:
+        env = dict(os.environ)
+        if no_splash:
+            env["LINK_SIGHT_NO_SPLASH"] = "1"
+        cmd = [sys.executable, "-m", "PyInstaller", str(spec), "--noconfirm"]
+        return subprocess.run(cmd, cwd=PROJECT_DIR, env=env).returncode
+
+    result_code = run_pyinstaller(no_splash=False)
+    if result_code != 0:
+        # Splash needs Tcl/Tk at build time; retry without it rather than fail.
+        print("\n  Splash-enabled build failed (Tcl/Tk at build time?) — retrying without splash…")
+        result_code = run_pyinstaller(no_splash=True)
+
+    if result_code != 0:
         print("\nBuild FAILED. See output above for errors.")
         sys.exit(1)
 

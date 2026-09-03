@@ -9,6 +9,24 @@
 
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+from pathlib import Path as _Path
+
+# Boot splash: PyInstaller's onefile bootloader can show a static image while
+# it extracts the bundle to temp (the 5-15s dead air before Python starts).
+# Requires Tcl/Tk at BUILD time; falls back to no splash when unavailable or
+# disabled (LINK_SIGHT_NO_SPLASH=1).
+_boot_image = _Path(SPECPATH) / 'assets' / 'splash_boot.png'
+_splash = None
+if os.environ.get('LINK_SIGHT_NO_SPLASH') != '1' and _boot_image.exists():
+    try:
+        from PyInstaller.building.splash import Splash
+        _splash = Splash(str(_boot_image), minify_script=False)
+        print('  [spec] boot splash enabled')
+    except Exception as e:  # noqa: BLE001
+        print(f'  [spec] boot splash unavailable ({e}); building without')
+        _splash = None
+
 a = Analysis(
     ['app.py'],
     pathex=[],
@@ -34,7 +52,6 @@ a = Analysis(
         'linksight.ui.controller',
         'linksight.ui.theme',
         'linksight.ui.main_window',
-        'linksight.ui.nic_status_widget',
         'linksight.ui.lan_info_widget',
         'linksight.ui.switch_info_widget',
         'linksight.ui.settings_widget',
@@ -85,6 +102,7 @@ exe = EXE(
     upx=False,
     console=False,
     icon='linksight.ico',
+    splash=_splash,
     disable_windowed_traceback=True,
 )
 
