@@ -15,17 +15,20 @@ from pathlib import Path as _Path
 # Boot splash: PyInstaller's onefile bootloader can show a static image while
 # it extracts the bundle to temp (the 5-15s dead air before Python starts).
 # Requires Tcl/Tk at BUILD time; falls back to no splash when unavailable or
-# disabled (LINK_SIGHT_NO_SPLASH=1).
-_boot_image = _Path(SPECPATH) / 'assets' / 'splash_boot.png'
-_splash = None
-if os.environ.get('LINK_SIGHT_NO_SPLASH') != '1' and _boot_image.exists():
+# disabled (LINK_SIGHT_NO_SPLASH=1). Created AFTER the Analysis so the Tcl/Tk
+# binaries can be added to the bundle TOCs.
+def _make_splash(a):
+    _boot_image = _Path(SPECPATH) / 'assets' / 'splash_boot.png'
+    if os.environ.get('LINK_SIGHT_NO_SPLASH') == '1' or not _boot_image.exists():
+        return None
     try:
         from PyInstaller.building.splash import Splash
-        _splash = Splash(str(_boot_image), minify_script=False)
+        splash = Splash(str(_boot_image), a.binaries, a.datas, minify_script=False)
         print('  [spec] boot splash enabled')
+        return splash
     except Exception as e:  # noqa: BLE001
         print(f'  [spec] boot splash unavailable ({e}); building without')
-        _splash = None
+        return None
 
 a = Analysis(
     ['app.py'],
@@ -87,6 +90,8 @@ a = Analysis(
 )
 
 pyz = PYZ(a.pure)
+
+_splash = _make_splash(a)
 
 exe = EXE(
     pyz,
