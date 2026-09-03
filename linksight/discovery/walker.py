@@ -1411,6 +1411,22 @@ class UpstreamWalker:
                         hop.status = "unreachable"
                         break
 
+                # Multi-address neighbor: prefer the address on-link with the
+                # walk context (local interface subnet on hop 1, previous hop's
+                # mgmt subnet afterwards) so VLAN-mismatched LLDP advertisements
+                # don't win. Applies to the STP root-port uplink too. A
+                # manually forced/ARP-resolved IP (not in the advertised list)
+                # is never overridden.
+                if (
+                    uplink_port_diag is not None
+                    and len(uplink_port_diag.neighbor_ips) > 1
+                    and uplink_port_diag.neighbor_ip in uplink_port_diag.neighbor_ips
+                ):
+                    ctx_ip = prev_hop_ip or endpoint_ip or curr_ip
+                    uplink_port_diag.neighbor_ip = _prefer_onlink_ip(
+                        uplink_port_diag.neighbor_ips, ctx_ip
+                    )
+
                 # Multi-address neighbor: keep alternate IPv4 addresses to probe
                 # if the preferred one does not answer SNMP. IPv6 is never a
                 # walk target.
