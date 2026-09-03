@@ -22,7 +22,7 @@ from .upstream_widget import UpstreamWidget
 from .feed_widget import FeedWidget
 from .settings_widget import SettingsWidget
 
-from ..capture.interfaces import list_interfaces, preferred_interface, NetInterface
+from ..capture.interfaces import list_interfaces, preferred_interface, wired_capture_interfaces, NetInterface
 from ..capture.sniffer import Sniffer
 from ..capture.demo import DemoSource
 from ..discovery.models import PortDiagnostics
@@ -235,6 +235,7 @@ class MainWindow(QMainWindow):
 
         # capture starts automatically
         self._start()
+        self._sync_capture_ui()
 
         # link-state and interface watcher
         self._setup_watcher()
@@ -269,12 +270,12 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(4, 4, 4, 4)
         main_layout.setSpacing(4)
 
-        # Top bar: interface picker + status (capture is always on)
+        # Top bar: interface picker + capture control + status
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("Capture on:"))
         self.iface_combo = QComboBox()
         self.interfaces = list_interfaces()
-        for nic in self.interfaces:
+        for nic in wired_capture_interfaces(self.interfaces):
             self.iface_combo.addItem(nic.label(), nic.name)
         preferred = preferred_interface(self.interfaces)
         if preferred is not None:
@@ -283,6 +284,12 @@ class MainWindow(QMainWindow):
                 self.iface_combo.setCurrentIndex(idx)
         self.iface_combo.setMinimumWidth(300)
         top_bar.addWidget(self.iface_combo)
+
+        self.capture_btn = QPushButton()
+        self.capture_btn.setObjectName("tool")
+        self.capture_btn.setFixedWidth(120)
+        self.capture_btn.clicked.connect(self._on_capture_toggle)
+        top_bar.addWidget(self.capture_btn)
 
         top_bar.addStretch(1)
 
@@ -362,11 +369,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(close_btn, alignment=Qt.AlignRight)
         dlg.exec()
 
-    # ── capture (always on) ──
+    # ── capture ──
 
     def _start(self) -> None:
-        if self.controller.source is not None:
+        # A stale source object whose thread died must not block a restart.
+        if self.controller.source is not None and self._capture_is_active():
             return  # already capturing
+        iface: str = ""
         if self.demo:
             self.controller.source = DemoSource(self.controller.on_device,
                                                 self.controller.on_dhcp, interval=2.5)
@@ -374,8 +383,9 @@ class MainWindow(QMainWindow):
         else:
             iface = self.iface_combo.currentData()
             if not iface:
-                self.top_status.setText("No network interface available")
-                self.top_status.setStyleSheet("color: #808080; font-size: 12px;")
+                self.top_status.setText("No wired network interface available")
+                self.top_status.setStyleSheet("color: #ef4444; font-size: 12px;")
+                self._sync_capture_ui()
                 return
             if sys.platform == "win32":
                 from ..capture import npcap
@@ -388,19 +398,77 @@ class MainWindow(QMainWindow):
                         "Install Npcap from Settings, or download it from npcap.com.",
                         QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
                     )
+                    self._sync_capture_ui()
                     if ret != QMessageBox.StandardButton.Ok:
                         return
                     self._open_settings()
                     return
+            if self.controller.source is not None:
+                # Dead/stale source — retire it before starting fresh.
+                try:
+                    self.controller.source.stop()
+                except Exception:
+                    pass
+                self.controller.source = None
             self.controller.source = Sniffer(iface, self.controller.on_device,
                                              self.controller.on_error,
                                              self.controller.on_dhcp)
             self.controller.source.start()
         self.controller.capture_state_changed.emit(True)
-        self.top_status.setText("Listening…" if not self.demo else "Replaying demo scenario…")
-        self.top_status.setStyleSheet("color: #808080; font-size: 12px;")
+        self.top_status.setText(
+            "Replaying demo scenario…" if self.demo
+            else f"Listening on {self.iface_combo.currentData() or iface}…"
+        )
+        self.top_status.setStyleSheet("color: #34d399; font-size: 12px;")
         self.top_status.setToolTip("")
         self.status_left.setText("")
+        self._sync_capture_ui()
+
+    def _capture_is_active(self) -> bool:
+        if self.demo:
+            return True
+        src = self.controller.source
+        if src is None:
+            return False
+        runner = getattr(src, "is_running", None)
+        if callable(runner):
+            try:
+                return bool(runner())
+            except Exception:
+                return True
+        return True
+
+    def _sync_capture_ui(self) -> None:
+        """Keep the Capture button and status honest about real capture state."""
+        if self.demo:
+            self.capture_btn.setText("Demo")
+            self.capture_btn.setEnabled(False)
+            return
+        active = self._capture_is_active()
+        self.capture_btn.setText("Stop capture" if active else "Start capture")
+        self.capture_btn.setEnabled(self.iface_combo.count() > 0)
+        if not active and self.iface_combo.count() == 0:
+            self.top_status.setText("No wired network interface available")
+            self.top_status.setStyleSheet("color: #ef4444; font-size: 12px;")
+
+    def _on_capture_toggle(self) -> None:
+        """Explicit start/stop — capture is not always-on anymore, and a dead
+        capture is visible and restartable instead of a silent empty screen."""
+        if self.demo:
+            return
+        if self._capture_is_active():
+            if self.controller.source is not None:
+                self.controller.source.stop()
+                if hasattr(self.controller.source, "wait"):
+                    self.controller.source.wait(1.0)
+                self.controller.source = None
+            self.controller.capture_state_changed.emit(False)
+            self.top_status.setText("Capture stopped")
+            self.top_status.setStyleSheet("color: #f59e0b; font-size: 12px;")
+            self.status_left.setText("")
+        else:
+            self._start()
+        self._sync_capture_ui()
 
     def _restart_capture(self) -> None:
         if self.demo:
@@ -457,13 +525,14 @@ class MainWindow(QMainWindow):
         current = self.iface_combo.currentData()
         self.iface_combo.blockSignals(True)
         self.iface_combo.clear()
-        for nic in self.interfaces:
+        for nic in wired_capture_interfaces(self.interfaces):
             self.iface_combo.addItem(nic.label(), nic.name)
         if current:
             idx = self.iface_combo.findData(current)
             if idx >= 0:
                 self.iface_combo.setCurrentIndex(idx)
         self.iface_combo.blockSignals(False)
+        self._sync_capture_ui()
 
         # b. Refresh LAN info widget (non-blocking)
         self.lan_widget.refresh()
@@ -911,6 +980,7 @@ class MainWindow(QMainWindow):
         summary = msg.splitlines()[0] if msg else ""
         self.status_left.setText(f"Capture error: {summary}")
         self.statusbar.showMessage(f"Capture error: {summary}", 5000)
+        self._sync_capture_ui()
 
     def _check_for_updates(self) -> None:
         """Check GitHub for a newer build — runs in background."""

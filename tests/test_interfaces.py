@@ -2,6 +2,7 @@
 
 from linksight.capture.interfaces import (
     list_interfaces, NetInterface, preferred_interface,
+    wired_capture_interfaces, is_wireless_nic,
 )
 
 
@@ -75,3 +76,36 @@ def test_prefers_ethernet_with_real_ip_over_apipa_ethernet():
 
 def test_returns_none_on_empty():
     assert preferred_interface([]) is None
+
+
+def test_is_wireless_detection():
+    assert is_wireless_nic(_nic("Wi-Fi", desc="Intel(R) Wi-Fi 6 AX201"))
+    assert is_wireless_nic(_nic("WLAN", desc="802.11n Wireless Adapter"))
+    assert is_wireless_nic(_nic("Bluetooth Network Connection",
+                                desc="Bluetooth Device (Personal Area Network)"))
+    assert not is_wireless_nic(_nic("Ethernet", desc="Realtek PCIe GbE Family Controller"))
+    assert not is_wireless_nic(_nic("Ethernet 2", desc="USB 10/100/1000 LAN"))
+
+
+def test_wired_capture_excludes_wifi_bluetooth_loopback():
+    ifaces = [
+        _nic("Wi-Fi", ips=["192.168.1.5"], desc="Intel(R) Wi-Fi 6 AX201"),
+        _nic("Ethernet", ips=["10.0.0.42"], desc="Realtek PCIe GbE"),
+        _nic("Loopback Pseudo-Interface 1", ips=["127.0.0.1"], loopback=True),
+        _nic("Bluetooth Network Connection", desc="Bluetooth PAN"),
+    ]
+    wired = wired_capture_interfaces(ifaces)
+    assert [n.name for n in wired] == ["Ethernet"]
+
+
+def test_preferred_never_selects_wireless_or_loopback():
+    """LLDP/CDP are wired-only; with no wired NIC there is no capture target."""
+    only_wireless = [
+        _nic("Wi-Fi", ips=["192.168.1.5"]),
+        _nic("Loopback Pseudo-Interface 1", ips=["127.0.0.1"], loopback=True),
+    ]
+    assert preferred_interface(only_wireless) is None
+    with_ethernet = only_wireless + [_nic("Ethernet", ips=["10.0.0.42"])]
+    pick = preferred_interface(with_ethernet)
+    assert pick is not None
+    assert pick.name == "Ethernet"
