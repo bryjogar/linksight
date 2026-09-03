@@ -83,12 +83,35 @@ def _iface_score(nic: NetInterface) -> int:
     return score
 
 
+def is_wireless_nic(nic: NetInterface) -> bool:
+    """True for Wi-Fi/Bluetooth/wireless interfaces — LLDP/CDP are wired
+    protocols and never travel over them (802.1AB is Ethernet-only)."""
+    blob = f"{(nic.name or '').lower()} {(nic.description or '').lower()}"
+    for token in (
+        "wi-fi", "wifi", "wlan", "wireless", "802.11", "airport",
+        "bluetooth", "pan", "radio",
+    ):
+        if token in blob:
+            return True
+    return False
+
+
+def wired_capture_interfaces(ifaces: list[NetInterface]) -> list[NetInterface]:
+    """Interfaces eligible for LLDP/CDP capture: wired and non-loopback."""
+    return [nic for nic in ifaces if not nic.is_loopback and not is_wireless_nic(nic)]
+
+
 def preferred_interface(ifaces: list[NetInterface] | None = None) -> NetInterface | None:
-    """Pick the best interface for capture, or None if nothing suitable."""
+    """Pick the best WIRED interface for capture, or None if nothing suitable.
+
+    Wi-Fi and loopback are never candidates — LLDP/CDP do not travel over
+    them, so showing them as selectable only produces dead captures.
+    """
     ifaces = ifaces if ifaces is not None else list_interfaces()
-    if not ifaces:
+    wired = wired_capture_interfaces(ifaces)
+    if not wired:
         return None
-    return max(ifaces, key=_iface_score)
+    return max(wired, key=_iface_score)
 
 
 def _via_scapy() -> list[NetInterface]:
