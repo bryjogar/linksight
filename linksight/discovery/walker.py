@@ -1193,7 +1193,10 @@ class UpstreamWalker:
                                 forced_port = candidate_uplinks[0]
 
                         if forced_port is not None:
-                            if forced_next_ip and not forced_port.neighbor_ip:
+                            # Manual/forced IP overrides whatever LLDP advertised
+                            # — an advertised address may be on the wrong VLAN
+                            # and unreachable from here.
+                            if forced_next_ip:
                                 forced_port.neighbor_ip = forced_next_ip
                             if forced_port.is_downlink:
                                 forced_port.is_downlink = False
@@ -1230,7 +1233,8 @@ class UpstreamWalker:
                                 forced_port = p
                                 break
                     if forced_port is not None:
-                        if forced_next_ip and not forced_port.neighbor_ip:
+                        # Manual/forced IP overrides whatever LLDP advertised.
+                        if forced_next_ip:
                             forced_port.neighbor_ip = forced_next_ip
                         if forced_port.is_downlink:
                             forced_port.is_downlink = False
