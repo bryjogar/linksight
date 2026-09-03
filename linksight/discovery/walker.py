@@ -54,6 +54,7 @@ OID_IF_DESCR = "1.3.6.1.2.1.2.2.1.2"
 OID_IF_SPEED = "1.3.6.1.2.1.2.2.1.5"
 OID_IF_ADMIN_STATUS = "1.3.6.1.2.1.2.2.1.7"
 OID_IF_OPER_STATUS = "1.3.6.1.2.1.2.2.1.8"
+OID_IF_PHYS_ADDRESS = "1.3.6.1.2.1.2.2.1.6"
 OID_IF_NAME = "1.3.6.1.2.1.31.1.1.1.1"
 OID_IF_HIGH_SPEED = "1.3.6.1.2.1.31.1.1.1.15"
 
@@ -674,6 +675,96 @@ class UpstreamWalker:
                                     p.neighbor_ip = isp_gateway
                                     p.neighbor_name = "ISP Gateway"
                                 break
+
+                    # ── Edge-to-core wiring map ─────────────────────────────
+                    # Every edge interface has its own MAC (ifPhysAddress) and
+                    # the downstream switch's FDB knows which physical port
+                    # learned that MAC — so "what is plugged in where" is
+                    # answerable without LLDP on the firewall. X0→core Gi1/0/24,
+                    # X2 (VLAN A) →core port 5, X3 (VLAN B) →core port 6…
+                    if prev_hop is not None and prev_hop.mgmt_ip:
+                        core_host = _decode_text(prev_hop.hostname) or prev_hop.mgmt_ip
+                        core_port_names: dict[int, str] = {}
+                        for cp in (prev_hop.ports or []):
+                            if cp.port_id is not None:
+                                core_port_names[cp.port_id] = (
+                                    _decode_port_id(cp.port_name) or f"Port {cp.port_id}"
+                                )
+
+                        # 1. LLDP port-id fallback: edge devices that DO send
+                        #    LLDP per interface (FortiGate etc.) advertise the
+                        #    iface name as the neighbor port-id on the core.
+                        for p in ports_list:
+                            if p.is_uplink or p.neighbor_port:
+                                continue
+                            pname = (p.port_name or "").strip().lower()
+                            if not pname:
+                                continue
+                            for cp in (prev_hop.ports or []):
+                                cpn = (_decode_port_id(cp.neighbor_port) or "").strip().lower()
+                                if cpn and cpn == pname:
+                                    if not p.neighbor_name:
+                                        p.neighbor_name = core_host
+                                    p.neighbor_port = _decode_port_id(cp.port_name) or f"Port {cp.port_id}"
+                                    p.is_downlink = True
+                                    break
+
+                        # 2. FDB MAC match: read each iface's ifPhysAddress, then
+                        #    exact-GET the core's dot1dTpFdbPort for that MAC
+                        #    (single batched request) → the core port it is
+                        #    physically wired to.
+                        if_phys: dict[int, str] = {}
+                        try:
+                            for oid, val in client.walk(OID_IF_PHYS_ADDRESS):
+                                idx = _parse_last_oid_index(oid)
+                                if idx is None:
+                                    continue
+                                try:
+                                    mac = _format_mac(val)
+                                    hexmac = (mac or "").replace(":", "").replace("-", "").lower()
+                                except Exception:
+                                    continue
+                                if len(hexmac) == 12:
+                                    if_phys[idx] = hexmac
+                        except Exception:
+                            pass
+
+                        if if_phys:
+                            if progress_callback:
+                                progress_callback(f"Mapping edge interfaces to {core_host} ports…")
+                            fdb_oids: list[str] = []
+                            edge_by_oid: dict[str, int] = {}
+                            for idx, hexmac in if_phys.items():
+                                if wan_diag is not None and idx == wan_diag.port_id:
+                                    continue  # WAN faces the ISP, not the core
+                                octets = ".".join(str(int(hexmac[i : i + 2], 16)) for i in range(0, 12, 2))
+                                oid = f"{OID_DOT1D_TP_FDB_PORT}.{octets}"
+                                fdb_oids.append(oid)
+                                edge_by_oid[oid] = idx
+                            if fdb_oids:
+                                core_client = None
+                                try:
+                                    core_client = self._get_client(prev_hop.mgmt_ip)
+                                    fdb_data = core_client.get(fdb_oids)
+                                    for oid, val in fdb_data.items():
+                                        idx = edge_by_oid.get(oid)
+                                        if idx is None or not isinstance(val, int) or isinstance(val, bool) or val <= 0:
+                                            continue
+                                        diag = next((p for p in ports_list if p.port_id == idx), None)
+                                        if diag is None or diag.is_uplink or diag.neighbor_port:
+                                            continue
+                                        diag.neighbor_name = core_host
+                                        diag.neighbor_port = core_port_names.get(val) or f"Port {val}"
+                                        if not diag.is_downlink:
+                                            diag.is_downlink = True
+                                except Exception:
+                                    pass
+                                finally:
+                                    if core_client is not None:
+                                        try:
+                                            core_client.close()
+                                        except Exception:
+                                            pass
 
                     hop = Hop(
                         hop_index=hop_index,
