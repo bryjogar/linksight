@@ -114,7 +114,7 @@ def test_interface_config_worker_cancellation():
 def test_start_arp_resolve_queues_rather_than_terminates(monkeypatch):
     """Verify _start_arp_resolve queues new request rather than calling terminate on busy worker."""
     from linksight.ui import main_window as mw_mod
-    monkeypatch.setattr(mw_mod.MainWindow, "_on_capture_error", lambda self, msg: None)
+    monkeypatch.setattr(mw_mod.MainWindow, "_on_capture_error", lambda self, msg, permission=False: None)
 
     app = QApplication.instance() or QApplication([])
     controller = AppController()

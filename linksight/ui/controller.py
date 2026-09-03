@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, Signal
 
+from ..capture.demo import DemoSource
+from ..capture.sniffer import Sniffer
 from ..parse.model import NeighborDevice
 from ..discovery.models import UpstreamPath
 
@@ -18,7 +20,7 @@ class AppController(QObject):
 
     device_seen = Signal(object, object)  # (NeighborDevice, raw_bytes)
     dhcp_seen = Signal(object, object)    # (DhcpObservation, raw_bytes)
-    capture_error = Signal(str)
+    capture_error = Signal(str, bool)     # (message, permission_denied)
     capture_state_changed = Signal(bool)  # True = running
     upstream_discovery_started = Signal(str)
     upstream_discovery_progress = Signal(str)
@@ -26,7 +28,7 @@ class AppController(QObject):
 
     def __init__(self):
         super().__init__()
-        self.source = None  # Sniffer or DemoSource, set by main_window
+        self.source: Sniffer | DemoSource | None = None  # set by main_window
         self.switch: NeighborDevice | None = None   # latest LLDP/CDP neighbor
         self.network: dict = {}                     # observed DHCP facts
         self.upstream_path: UpstreamPath | None = None
@@ -51,7 +53,11 @@ class AppController(QObject):
         self.dhcp_seen.emit(obs, raw)
 
     def on_error(self, msg: str) -> None:
-        self.capture_error.emit(msg)
+        self.capture_error.emit(msg, False)
+
+    def on_permission_error(self, msg: str) -> None:
+        """Permission denials (relaunch as admin) — distinct from generic errors."""
+        self.capture_error.emit(msg, True)
 
     def on_upstream_started(self, start_ip: str) -> None:
         self.upstream_discovery_started.emit(start_ip)

@@ -12,6 +12,7 @@ from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from linksight.capture.interfaces import NetInterface
+from linksight.capture.sniffer import Sniffer
 from linksight.capture.system_info import InterfaceConfig
 from linksight.ui.controller import AppController
 from linksight.ui.lan_info_widget import LanInfoWidget
@@ -431,6 +432,41 @@ def test_capture_error_is_non_modal(monkeypatch):
     finally:
         window.close()
         controller.close()
+
+
+def test_capture_permission_error_shows_admin_action(monkeypatch):
+    """Permission denials must read as an action ('run as Administrator'),
+    not a generic capture error — the field engineer's fix is a relaunch."""
+    app = QApplication.instance() or QApplication([])
+    controller = AppController()
+    window = MainWindow(controller, demo=True)
+    try:
+        window._on_capture_error(
+            "Unable to capture - run LinkSight as Administrator\n\nDetail line.",
+            permission=True,
+        )
+        assert window.top_status.text() == "Capture blocked"
+        assert "run LinkSight as Administrator" in window.status_left.text()
+        # Full detail still available on the status tooltip
+        assert "Detail line." in window.top_status.toolTip()
+    finally:
+        window.close()
+        controller.close()
+
+
+def test_permission_message_headline_is_actionable():
+    """The sniffer's permission message must lead with the action, per platform."""
+    msg = Sniffer._permission_message()
+    assert msg.splitlines()[0].startswith("Unable to capture")
+
+
+def test_sniffer_permission_callback_falls_back_to_on_error():
+    """Plain Sniffer callers (no on_permission_error) still get permission text."""
+    seen = []
+    sniffer = Sniffer("eth0", on_device=lambda *a: None, on_error=seen.append)
+    assert sniffer.on_permission_error is sniffer.on_error
+    sniffer.on_permission_error("nope")
+    assert seen == ["nope"]
 
 
 def test_capture_error_rate_limiting(monkeypatch):

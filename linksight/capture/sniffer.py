@@ -12,6 +12,7 @@ Privilege handling:
 
 from __future__ import annotations
 
+import sys
 import threading
 from typing import Callable
 
@@ -38,11 +39,16 @@ class Sniffer:
         on_device: Callable[[NeighborDevice, bytes | None], None],
         on_error: Callable[[str], None] | None = None,
         on_dhcp: Callable[[object, bytes | None], None] | None = None,
+        on_permission_error: Callable[[str], None] | None = None,
     ):
         self.interface = interface
         self.on_device = on_device
         self.on_error = on_error or (lambda msg: print(f"[linksight] {msg}"))
         self.on_dhcp = on_dhcp
+        # Permission denials are a distinct, actionable failure (relaunch as
+        # admin) — surfaced separately so the UI can say so instead of showing
+        # a generic capture error. Defaults to on_error for plain callers.
+        self.on_permission_error = on_permission_error or self.on_error
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -111,19 +117,37 @@ class Sniffer:
                 store=False,
             )
         except PermissionError as e:
-            self.on_error(self._permission_message())
+            self.on_permission_error(self._permission_message())
         except Exception as e:  # Scapy wraps OS errors in many ways
             msg = str(e).lower()
             if "permission" in msg or "operation not permitted" in msg or "npcap" in msg:
-                self.on_error(self._permission_message())
+                self.on_permission_error(self._permission_message())
             else:
                 self.on_error(f"Capture failed on {self.interface}: {e}")
 
     @staticmethod
     def _permission_message() -> str:
-        return (
-            "Packet capture needs privileges this process doesn't have.\n\n"
-            "  • Windows: install Npcap (https://npcap.com) and run as Administrator.\n"
-            "  • macOS: allow the terminal/application BPF access (System Settings > Privacy & Security).\n"
-            "  • Linux: run with CAP_NET_RAW (docker: cap_add: [NET_RAW], or sudo)."
-        )
+        """Actionable permission-denial notice: headline line, then detail."""
+        if sys.platform.startswith("win"):
+            headline = "Unable to capture - run LinkSight as Administrator"
+            body = (
+                "Packet capture on Windows goes through Npcap, which by default "
+                "only allows elevated processes to open the adapter.\n\n"
+                "Fix: close LinkSight, right-click it, and choose "
+                "'Run as administrator'.\n"
+                "Permanent fix: reinstall Npcap and tick 'Allow non-admin "
+                "applications to capture packets' (https://npcap.com)."
+            )
+        elif sys.platform == "darwin":
+            headline = "Unable to capture - LinkSight needs packet-capture permission"
+            body = (
+                "macOS grants raw-packet (BPF) access per app. Grant LinkSight "
+                "permission in System Settings > Privacy & Security, then relaunch."
+            )
+        else:
+            headline = "Unable to capture - run LinkSight with CAP_NET_RAW (or as root)"
+            body = (
+                "Linux requires CAP_NET_RAW for packet capture. Run LinkSight as "
+                "root, grant the capability, or (in Docker) add cap_add: [NET_RAW]."
+            )
+        return f"{headline}\n\n{body}"
