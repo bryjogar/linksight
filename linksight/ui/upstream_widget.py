@@ -51,13 +51,22 @@ def _format_speed(speed_mbps: int | None) -> tuple[str, str]:
 
 
 def _safe_display_text(val: Any, fallback: str = "") -> str:
-    """Ensure display text is a clean string and never a bytes repr (b'...') or raw bytes."""
+    """Ensure display text is a clean string and never a bytes repr (b'...') or raw bytes.
+
+    Decodes bytes and full bytes-reprs instead of dropping them; anything else
+    that still smells like a repr or control text falls back."""
     if not val:
         return fallback
+    from ..text_util import decode_text
+
     if isinstance(val, (bytes, bytearray)):
-        return fallback
+        dec = decode_text(val)
+        return dec if dec else fallback
     s = str(val).strip()
-    if s.startswith("b'") or s.startswith('b"') or "b'" in s:
+    if (s.startswith("b'") and s.endswith("'")) or (s.startswith('b"') and s.endswith('"')):
+        dec = decode_text(s)
+        return dec if dec else fallback
+    if "b'" in s or 'b"' in s:
         return fallback
     return s
 

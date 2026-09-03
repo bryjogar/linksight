@@ -17,7 +17,7 @@ from ..text_util import (
     is_printable_text as _is_printable_text,
 )
 from .classifier import classify_device, is_edge_device
-from .models import Hop, PortDiagnostics, UpstreamPath, _prefer_ipv4
+from .models import Hop, PortDiagnostics, UpstreamPath, _prefer_ipv4, _prefer_onlink_ip
 from .arp_resolve import normalize_mac
 from .snmp_client import (
     SnmpClient,
@@ -1124,6 +1124,7 @@ class UpstreamWalker:
                                 continue
                         candidate_uplinks.append(p)
 
+                    was_forced_request = bool(forced_next_ip or forced_port_id is not None)
                     if forced_next_ip or forced_port_id is not None:
                         forced_port = None
                         # 1. Direct port_id match on target hop (deterministic continuation)
@@ -1193,6 +1194,15 @@ class UpstreamWalker:
                     elif not is_root and len(candidate_uplinks) == 1 and candidate_uplinks[0].neighbor_ip:
                         uplink_port_diag = candidate_uplinks[0]
                         uplink_port_diag.is_uplink = True
+
+                    # Natural (non-forced) multi-IP candidates: prefer the
+                    # on-link address for the flagged mgmt IP so continuation
+                    # walks to a reachable address, not LLDP table order.
+                    if not was_forced_request:
+                        ctx_ip = prev_hop_ip or endpoint_ip or curr_ip
+                        for p in candidate_uplinks:
+                            if len(p.neighbor_ips) > 1 and p.neighbor_ip in p.neighbor_ips:
+                                p.neighbor_ip = _prefer_onlink_ip(p.neighbor_ips, ctx_ip)
                 elif forced_next_ip or forced_port_id is not None:
                     forced_port = None
                     if forced_port_id is not None and (not forced_hop_ip or curr_ip == forced_hop_ip):
@@ -1384,15 +1394,12 @@ class UpstreamWalker:
                         hop.status = "unreachable"
                         break
 
-                # Multi-address neighbor: keep alternate addresses to probe if the
-                # preferred one does not answer SNMP. Prefer IPv4 ordering.
+                # Multi-address neighbor: keep alternate IPv4 addresses to probe
+                # if the preferred one does not answer SNMP. IPv6 is never a
+                # walk target.
                 alt_ips = [
                     ip for ip in (uplink_port_diag.neighbor_ips or [])
                     if ip != uplink_port_diag.neighbor_ip and ":" not in ip
-                ]
-                alt_ips += [
-                    ip for ip in (uplink_port_diag.neighbor_ips or [])
-                    if ip != uplink_port_diag.neighbor_ip and ":" in ip and not ip.lower().startswith("fe80")
                 ]
                 pending_alt_ips = alt_ips[:3]
                 next_ip = uplink_port_diag.neighbor_ip

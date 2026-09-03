@@ -19,16 +19,43 @@ def _now() -> str:
 
 
 def _prefer_ipv4(ips: list[str]) -> str:
-    """Pick the preferred management address: first IPv4 non-link-local, else
-    first non-link-local (IPv6 global/ULA), else empty. IPv6 link-local alone
-    is never chosen — it is not walkable without a zone/scope ID."""
+    """Pick the preferred management address: first IPv4 (link-local 169.254
+    excluded), else empty. IPv6 is never chosen — walks are IPv4-only."""
     for ip in ips:
         if ":" not in ip and not ip.lower().startswith("169.254."):
             return ip
-    for ip in ips:
-        if ":" in ip and not ip.lower().startswith("fe80"):
-            return ip
     return ""
+
+
+def _ipv4_network(ip: str, prefix: int) -> str | None:
+    """Network address string for an IPv4 and prefix, or None on failure."""
+    import ipaddress
+
+    try:
+        return str(ipaddress.IPv4Network(f"{ip}/{prefix}", strict=False).network_address)
+    except Exception:
+        return None
+
+
+def _prefer_onlink_ip(ips: list[str], context_ip: str) -> str:
+    """Among IPv4 management candidates, prefer the one on-link with the walk
+    context: same /24 first, then same /16. Fall back to the first usable
+    IPv4. Never returns IPv6."""
+    v4 = [ip for ip in ips if ":" not in ip and not ip.lower().startswith("169.254.")]
+    if not v4:
+        return ""
+    if context_ip:
+        ctx24 = _ipv4_network(context_ip, 24)
+        if ctx24:
+            for ip in v4:
+                if _ipv4_network(ip, 24) == ctx24:
+                    return ip
+        ctx16 = _ipv4_network(context_ip, 16)
+        if ctx16:
+            for ip in v4:
+                if _ipv4_network(ip, 16) == ctx16:
+                    return ip
+    return v4[0]
 
 
 @dataclass
@@ -56,6 +83,20 @@ class PortDiagnostics:
     platform: str = ""
 
     def __post_init__(self) -> None:
+        # Normalize port_id (bytes/reprs can leak into "Port b'...'")
+        if isinstance(self.port_id, (bytes, bytearray)):
+            self.port_id = decode_port_id(self.port_id)
+        elif isinstance(self.port_id, str):
+            s = self.port_id.strip()
+            if (s.startswith("b'") and s.endswith("'")) or (s.startswith('b"') and s.endswith('"')):
+                s = decode_port_id(s) or ""
+            elif not is_printable_text(s):
+                s = ""
+            if s.isdigit():
+                self.port_id = int(s)
+            else:
+                self.port_id = s
+
         # Normalize port_name
         if isinstance(self.port_name, (bytes, bytearray)):
             dec = decode_text(self.port_name)
@@ -147,10 +188,15 @@ class PortDiagnostics:
             if dec and dec not in cleaned_ips:
                 cleaned_ips.append(dec)
         self.neighbor_ips = cleaned_ips
-        if self.neighbor_ips and self.neighbor_ip not in self.neighbor_ips:
+        # The list is authoritative: always resync the single field to the
+        # preferred IPv4. A pre-set IPv6 (or stale address) must not survive.
+        if self.neighbor_ips:
             self.neighbor_ip = _prefer_ipv4(self.neighbor_ips)
         elif self.neighbor_ip and self.neighbor_ip not in self.neighbor_ips:
             self.neighbor_ips.insert(0, self.neighbor_ip)
+        # IPv6 is never a management/walk address — clear any that remains.
+        if ":" in self.neighbor_ip:
+            self.neighbor_ip = ""
 
         # Normalize platform
         if isinstance(self.platform, (bytes, bytearray)):
