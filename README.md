@@ -39,7 +39,7 @@ python app.py --demo             # replay simulated network frames without captu
 ## Build
 
 - **Windows (Folder / Portable):** `python build_exe.py` → `dist/LinkSight/LinkSight.exe` (portable directory, extracts once at build time for instant startup; Npcap required on target).
-- **Windows (Single File):** `python build_portable.py` → `dist/LinkSight-Portable.exe` — single self-contained executable without `_internal/` folder. Convenient for remote deployment tools that transfer a single binary, though startup takes several seconds while decompressing to a temporary directory on each run.
+- **Windows (Single File):** `python build_portable.py` → `dist/LinkSight-Portable.exe` — single self-contained executable without `_internal/` folder. Convenient for remote deployment tools that transfer a single binary, though startup takes several seconds while decompressing to a temporary directory on each run (a LinkSight boot splash is shown during extraction; the in-app splash then reports launch progress).
 - **macOS:** `python build_mac.py` → `dist/LinkSight.app` and `dist/LinkSight-mac.zip` (portable application bundle).
 
 ### Release via GitHub Actions

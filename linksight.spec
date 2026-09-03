@@ -26,7 +26,6 @@ a = Analysis(
         'linksight.ui.controller',
         'linksight.ui.theme',
         'linksight.ui.main_window',
-        'linksight.ui.nic_status_widget',
         'linksight.ui.lan_info_widget',
         'linksight.ui.switch_info_widget',
         'linksight.ui.settings_widget',
