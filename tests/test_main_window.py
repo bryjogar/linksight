@@ -21,10 +21,9 @@ def test_on_iface_changed_no_crash():
         # Directly call _on_iface_changed with default selection (or no selection)
         window._on_iface_changed()
 
-        # If interfaces exist in the table, test with an active current index as well
-        if window.nic_widget.model.rowCount() > 0:
-            idx = window.nic_widget.model.index(0, 0)
-            window.nic_widget.table.setCurrentIndex(idx)
+        # If wired interfaces exist in the dropdown, exercise a real switch
+        if window.iface_combo.count() > 0:
+            window.iface_combo.setCurrentIndex(0)
             window._on_iface_changed()
     finally:
         controller.close()

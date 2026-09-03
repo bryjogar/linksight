@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QDialog, QInputDialog)
 
 from .controller import AppController
-from .nic_status_widget import NicStatusWidget
 from .lan_info_widget import LanInfoWidget
 from .switch_info_widget import SwitchInfoWidget
 from .upstream_widget import UpstreamWidget
@@ -216,7 +215,6 @@ class MainWindow(QMainWindow):
         self.controller.device_seen.connect(self._on_device)
         self.controller.dhcp_seen.connect(self._on_dhcp)
         self.controller.capture_error.connect(self._on_capture_error)
-        self.nic_widget.selection_changed.connect(self._on_nic_selected)
         self.iface_combo.currentIndexChanged.connect(self._on_iface_changed)
         self.switch_widget.ssh_requested.connect(self._on_ssh_requested)
         self.switch_widget.upstream_requested.connect(self._on_upstream_requested)
@@ -304,11 +302,8 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(top_bar)
 
-        # Body: NIC status (top), LAN + Switch (side by side below)
-        self.nic_widget = NicStatusWidget()
-        self.nic_widget.setMaximumHeight(190)
-        main_layout.addWidget(self.nic_widget)
-
+        # Body: LAN Info + Switch Info side by side; the capture dropdown in
+        # the top bar defines which wired adapter is being monitored.
         info_row = QHBoxLayout()
         info_row.setSpacing(4)
         self.lan_widget = LanInfoWidget(controller=self.controller)
@@ -495,18 +490,15 @@ class MainWindow(QMainWindow):
         active = self.iface_combo.currentData() or ""
         if hasattr(self, "_watcher") and self._watcher is not None:
             self._watcher.set_active_interface(active)
-        # refresh LAN info for the new adapter
-        row = self.nic_widget.table.currentIndex().row()
-        nic = self.nic_widget.model.nic_at(row) if row >= 0 else None
-        if nic is not None:
-            self.lan_widget.set_interface(nic.name, nic.mac)
-        elif self.iface_combo.currentData():
+        # refresh LAN info for the newly selected adapter
+        name = self.iface_combo.currentData() or ""
+        if name:
             mac = ""
             for n in self.interfaces:
-                if n.name == self.iface_combo.currentData():
+                if n.name == name:
                     mac = n.mac
                     break
-            self.lan_widget.set_interface(self.iface_combo.currentData(), mac)
+            self.lan_widget.set_interface(name, mac)
 
     def _setup_watcher(self) -> None:
         active_iface = self.iface_combo.currentData() or ""
@@ -522,8 +514,6 @@ class MainWindow(QMainWindow):
 
     def _on_interfaces_changed(self, nics: list[NetInterface]) -> None:
         self.interfaces = nics
-        # a. Update NIC table model in place (preserving selection)
-        self.nic_widget.refresh(nics)
 
         # Update iface_combo items without resetting selection
         current = self.iface_combo.currentData()
@@ -618,10 +608,6 @@ class MainWindow(QMainWindow):
         self.lan_widget.refresh()
         self.status_right.setText(
             f"DHCP {obs.message_type} from {obs.server_ip or '?'}")
-
-    def _on_nic_selected(self, nic) -> None:
-        if nic is not None:
-            self.lan_widget.set_interface(nic.name, nic.mac)
 
     def _on_ssh_requested(self, ip: str) -> None:
         """Ask for the SSH username (the terminal prompts for the password),

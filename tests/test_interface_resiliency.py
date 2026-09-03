@@ -16,7 +16,6 @@ from linksight.capture.sniffer import Sniffer
 from linksight.capture.system_info import InterfaceConfig
 from linksight.ui.controller import AppController
 from linksight.ui.lan_info_widget import LanInfoWidget
-from linksight.ui.nic_status_widget import NicStatusWidget
 from linksight.ui.interface_watcher import InterfaceWatcher
 from linksight.ui.main_window import MainWindow
 
@@ -320,51 +319,8 @@ def test_interface_watcher_default_state_provider_uses_reload(monkeypatch):
     assert reload_args == [True, True]
 
 
-def test_nic_status_widget_refresh_preserves_selection():
-    """Verify NicStatusWidget refresh preserves user selection in place."""
-    app = QApplication.instance() or QApplication([])
-
-    nics_v1 = [
-        NetInterface(name="eth0", ips=["10.0.0.1"], is_up=True),
-        NetInterface(name="eth1", ips=["10.0.0.2"], is_up=False),
-        NetInterface(name="wlan0", ips=[], is_up=False),
-    ]
-
-    widget = NicStatusWidget()
-    widget.refresh(nics_v1)
-
-    # Select eth1 (row 1)
-    idx_eth1 = widget.model.index(1, 0)
-    widget.table.setCurrentIndex(idx_eth1)
-    assert widget.table.currentIndex().row() == 1
-
-    # Update: eth1 is now UP and eth0 gained an IP
-    nics_v2 = [
-        NetInterface(name="eth0", ips=["10.0.0.1", "10.0.0.99"], is_up=True),
-        NetInterface(name="eth1", ips=["10.0.0.2"], is_up=True),
-        NetInterface(name="wlan0", ips=[], is_up=False),
-    ]
-    widget.refresh(nics_v2)
-
-    # Selection should still be row 1 (eth1)
-    assert widget.table.currentIndex().row() == 1
-    selected_nic = widget.model.nic_at(widget.table.currentIndex().row())
-    assert selected_nic is not None
-    assert selected_nic.name == "eth1"
-    assert selected_nic.is_up is True
-
-    # Update: remove eth1
-    nics_v3 = [
-        NetInterface(name="eth0", ips=["10.0.0.1"], is_up=True),
-        NetInterface(name="wlan0", ips=[], is_up=False),
-    ]
-    widget.refresh(nics_v3)
-    # Does not crash, rowCount is 2
-    assert widget.model.rowCount() == 2
-
-
 def test_main_window_watcher_link_flap_and_restart():
-    """Verify MainWindow handles link flaps: updates NIC table, refreshes LAN info, and restarts capture."""
+    """Verify MainWindow handles link flaps: updates interface list, refreshes LAN info, and restarts capture."""
     app = QApplication.instance() or QApplication([])
     controller = AppController()
 
@@ -374,17 +330,16 @@ def test_main_window_watcher_link_flap_and_restart():
 
     window = MainWindow(controller, demo=True, state_provider=lambda: state)
     try:
-        assert window.nic_widget.model.rowCount() >= 1
+        # The capture dropdown is driven by the watcher's interface list
+        assert len(window.interfaces) >= 1
 
         # Simulate link flap: DOWN -> UP -> UP
         state = [NetInterface(name="eth0", ips=[], is_up=False)]
         window._watcher.check_now()
         QCoreApplication.processEvents()
 
-        # Check NIC table reflects DOWN
-        nic = window.nic_widget.model.nic_at(0)
-        assert nic is not None
-        assert nic.is_up is False
+        # Interface list reflects DOWN
+        assert window.interfaces[0].is_up is False
 
         # Link comes UP (tick 1)
         state = [NetInterface(name="eth0", ips=[], is_up=True)]
@@ -395,10 +350,8 @@ def test_main_window_watcher_link_flap_and_restart():
         window._watcher.check_now()
         QCoreApplication.processEvents()
 
-        # Check NIC table reflects UP
-        nic = window.nic_widget.model.nic_at(0)
-        assert nic is not None
-        assert nic.is_up is True
+        # Interface list reflects UP
+        assert window.interfaces[0].is_up is True
     finally:
         window.close()
         controller.close()
