@@ -52,6 +52,7 @@ class UpstreamWorker(QThread):
         forced_hop_ip: str | None = None,
         forced_candidate: PortDiagnostics | None = None,
         no_ip_resolver: Callable[..., str | None] | None = None,
+        endpoint_gateways: list[str] | None = None,
     ):
         super().__init__(parent)
         self.start_ip = start_ip
@@ -65,6 +66,7 @@ class UpstreamWorker(QThread):
         self.forced_hop_ip = forced_hop_ip
         self.forced_candidate = forced_candidate
         self.no_ip_resolver = no_ip_resolver
+        self.endpoint_gateways = endpoint_gateways or []
         self._stop_event = threading.Event()
 
     def stop(self) -> None:
@@ -127,6 +129,7 @@ class UpstreamWorker(QThread):
                 forced_hop_ip=self.forced_hop_ip,
                 forced_candidate=self.forced_candidate,
                 resolve_no_ip_neighbor=self.no_ip_resolver,
+                endpoint_gateways=self.endpoint_gateways,
             )
             if self._stop_event.is_set():
                 self.cancelled.emit()
@@ -710,6 +713,18 @@ class MainWindow(QMainWindow):
         if self.demo and not endpoint_mac:
             endpoint_mac = "aa:bb:cc:11:22:33"
 
+        # Edge-device candidates: the DHCP-observed gateway(s) plus the OS
+        # gateway read by the LAN Info panel (covers static config / no lease
+        # traffic). Both point at the same physical edge in these networks.
+        endpoint_gateways: list[str] = list(self.controller.network.get("gateways", []) or [])
+        try:
+            cfg = self.lan_widget._cached_cfg
+            os_gw = (cfg.gateway or "").strip() if cfg else ""
+            if os_gw and os_gw not in endpoint_gateways:
+                endpoint_gateways.append(os_gw)
+        except Exception:
+            pass
+
         # Resolver for STP root-port neighbors that advertise no LLDP management IP.
         # Builds a NeighborDevice from the port's chassis MAC and ARP-resolves it,
         # exactly like the continuation-path resolver below (kept RAM-only, no state).
@@ -744,6 +759,7 @@ class MainWindow(QMainWindow):
             forced_hop_ip=forced_hop_ip,
             forced_candidate=forced_candidate,
             no_ip_resolver=_no_ip_port_resolver,
+            endpoint_gateways=endpoint_gateways,
         )
         self._upstream_worker.progress.connect(self._on_discovery_progress)
         self._upstream_worker.finished.connect(self._on_discovery_finished)
