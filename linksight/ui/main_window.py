@@ -410,9 +410,13 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self.controller.source = None
-            self.controller.source = Sniffer(iface, self.controller.on_device,
-                                             self.controller.on_error,
-                                             self.controller.on_dhcp)
+            self.controller.source = Sniffer(
+                iface,
+                self.controller.on_device,
+                self.controller.on_error,
+                self.controller.on_dhcp,
+                self.controller.on_permission_error,
+            )
             self.controller.source.start()
         self.controller.capture_state_changed.emit(True)
         self.top_status.setText(
@@ -968,18 +972,25 @@ class MainWindow(QMainWindow):
             # The prompt is convenience — never let it disrupt the finished path view
             pass
 
-    def _on_capture_error(self, msg: str) -> None:
+    def _on_capture_error(self, msg: str, permission: bool = False) -> None:
         now = time.monotonic()
         if now - getattr(self, "_last_capture_error_time", 0.0) < 5.0:
             return
         self._last_capture_error_time = now
 
-        self.top_status.setText("Capture error")
+        summary = msg.splitlines()[0] if msg else ""
+        if permission:
+            # Actionable: the user's fix is to relaunch elevated, not to
+            # decipher a driver error. First line already carries the action.
+            self.top_status.setText("Capture blocked")
+            self.status_left.setText(summary or "Unable to capture - run LinkSight as Administrator")
+            self.statusbar.showMessage(summary or "Unable to capture", 8000)
+        else:
+            self.top_status.setText("Capture error")
+            self.status_left.setText(f"Capture error: {summary}")
+            self.statusbar.showMessage(f"Capture error: {summary}", 5000)
         self.top_status.setStyleSheet("color: #ef4444; font-size: 12px;")
         self.top_status.setToolTip(msg)
-        summary = msg.splitlines()[0] if msg else ""
-        self.status_left.setText(f"Capture error: {summary}")
-        self.statusbar.showMessage(f"Capture error: {summary}", 5000)
         self._sync_capture_ui()
 
     def _check_for_updates(self) -> None:

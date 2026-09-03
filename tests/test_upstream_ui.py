@@ -372,7 +372,7 @@ def test_main_window_arp_resolve_success(monkeypatch):
     # and would raise a MODAL capture-error dialog that blocks processEvents
     # forever. Stub the handler — the capture pipeline is not under test here.
     from linksight.ui import main_window as mw_mod
-    monkeypatch.setattr(mw_mod.MainWindow, "_on_capture_error", lambda self, msg: None)
+    monkeypatch.setattr(mw_mod.MainWindow, "_on_capture_error", lambda self, msg, permission=False: None)
 
     app = QApplication.instance() or QApplication([])
     controller = AppController()
@@ -417,7 +417,7 @@ def test_main_window_arp_resolve_none(monkeypatch):
 
     # demo=False auto-starts a real sniffer; headless env errors would raise a
     # MODAL capture-error dialog that blocks processEvents forever.
-    monkeypatch.setattr(mw_mod.MainWindow, "_on_capture_error", lambda self, msg: None)
+    monkeypatch.setattr(mw_mod.MainWindow, "_on_capture_error", lambda self, msg, permission=False: None)
 
     app = QApplication.instance() or QApplication([])
     controller = AppController()
@@ -1195,7 +1195,7 @@ def test_main_window_stalled_hop_auto_prompt(monkeypatch):
         # No auto-prompt in demo mode by design — force it off by monkeypatching demo
         monkeypatch.setattr(window, "demo", False)
         # Stub the sniffer-error modal path that fires when demo=False starts capture
-        monkeypatch.setattr(window, "_on_capture_error", lambda msg: None)
+        monkeypatch.setattr(window, "_on_capture_error", lambda msg, permission=False: None)
 
         cand = PortDiagnostics(
             port_id=47,
