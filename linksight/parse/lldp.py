@@ -9,7 +9,11 @@ Frame format:
 from __future__ import annotations
 
 from .model import NeighborDevice
-from ..text_util import decode_text as _decode_text
+from ..text_util import (
+    decode_text as _decode_text,
+    decode_port_id as _decode_port_id,
+    decode_chassis_id as _decode_chassis_id,
+)
 
 LLDP_ETHERTYPE = 0x88CC
 LLDP_MULTICAST = "01:80:c2:00:00:0e"
@@ -141,8 +145,7 @@ def parse_lldp_frame(frame: bytes, source_interface: str = "?") -> NeighborDevic
             if st == 4 and len(tlv_payload) >= 7:
                 dev.chassis_id = _hex_mac(tlv_payload[1:7])
             elif st in (5, 7) and len(tlv_payload) >= 2:
-                dec = _decode_text(tlv_payload[1:])
-                dev.chassis_id = dec if dec else tlv_payload[1:].hex()
+                dev.chassis_id = _decode_chassis_id(tlv_payload[1:]) or tlv_payload[1:].hex()
             else:
                 dev.chassis_id = tlv_payload[1:].hex()
         elif tlv_type == TLV_PORT_ID and len(tlv_payload) >= 1:
@@ -151,8 +154,7 @@ def parse_lldp_frame(frame: bytes, source_interface: str = "?") -> NeighborDevic
             if st == 3 and len(tlv_payload) >= 7:
                 dev.port_id = _hex_mac(tlv_payload[1:7])
             elif st in (5, 7) and len(tlv_payload) >= 2:
-                dec = _decode_text(tlv_payload[1:])
-                dev.port_id = dec if dec else tlv_payload[1:].hex()
+                dev.port_id = _decode_port_id(tlv_payload[1:]) or tlv_payload[1:].hex()
             else:
                 dev.port_id = tlv_payload[1:].hex()
         elif tlv_type == TLV_SYSTEM_NAME:

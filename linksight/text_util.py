@@ -32,6 +32,22 @@ def is_printable_text(s: str) -> bool:
 _is_printable_text = is_printable_text
 
 
+def is_ascii_printable_text(s: str) -> bool:
+    """Check if string contains only printable ASCII characters (and standard whitespace)."""
+    if not s:
+        return True
+    for ch in s:
+        if ch in ("\t", "\n", "\r"):
+            continue
+        code = ord(ch)
+        if code < 32 or code > 126:
+            return False
+    return True
+
+
+_is_ascii_printable_text = is_ascii_printable_text
+
+
 def decode_text(val: Any) -> str | None:
     """Safely decode SNMP or network value to clean printable text.
 
@@ -104,24 +120,91 @@ def decode_text(val: Any) -> str | None:
 _decode_text = decode_text
 
 
-def decode_port_id(val: Any) -> str:
-    """Decode a port identifier from SNMP/LLDP value.
+def decode_identity(val: Any) -> str:
+    """Decode an identity field (chassis ID, port ID) to clean ASCII text or binary.
 
-    Returns printable text if valid, formatted MAC address if 6/8 bytes,
-    hex string for other binary octets, or empty string. Never returns a bytes repr.
+    Identity fields are ASCII by standard. Only accepts ASCII-printable decodes;
+    anything else falls back to binary formatting: MAC for 6/8 octets, hex otherwise.
+    Never returns Cyrillic/mojibake text for binary identifiers.
     """
-    text = decode_text(val)
-    if text:
-        return text
+    if val is None:
+        return ""
+    if hasattr(val, "__class__") and val.__class__.__name__ in (
+        "NoSuchObject",
+        "NoSuchInstance",
+        "EndOfMibView",
+    ):
+        return ""
+
     if isinstance(val, (bytes, bytearray)):
         b = bytes(val)
+        if not b:
+            return ""
+        try:
+            s = b.decode("ascii")
+            cleaned = s.rstrip("\x00").strip()
+            if cleaned and is_ascii_printable_text(cleaned):
+                return cleaned
+        except (UnicodeDecodeError, Exception):
+            pass
         if len(b) in (6, 8):
             return ":".join(f"{x:02x}" for x in b)
         return b.hex()
+
+    if isinstance(val, str):
+        s = val.strip()
+        if (s.startswith("b'") and s.endswith("'")) or (s.startswith('b"') and s.endswith('"')):
+            try:
+                evaluated = ast.literal_eval(s)
+                if isinstance(evaluated, (bytes, bytearray)):
+                    return decode_identity(evaluated)
+            except Exception:
+                return ""
+        cleaned = s.rstrip("\x00").strip()
+        if not cleaned:
+            return ""
+        if "b'" in cleaned or 'b"' in cleaned:
+            idx = cleaned.find("b'")
+            if idx != -1:
+                return ""
+        if is_ascii_printable_text(cleaned):
+            return cleaned
+        try:
+            b = s.encode("utf-8")
+            if len(b) in (6, 8):
+                return ":".join(f"{x:02x}" for x in b)
+            return b.hex()
+        except Exception:
+            return ""
+
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return str(val)
+
     return ""
 
 
+def decode_port_id(val: Any) -> str:
+    """Decode a port identifier from SNMP/LLDP value.
+
+    Returns ASCII-printable text if valid, formatted MAC address if 6/8 bytes,
+    hex string for other binary octets, or empty string.
+    """
+    return decode_identity(val)
+
+
 _decode_port_id = decode_port_id
+
+
+def decode_chassis_id(val: Any) -> str:
+    """Decode a chassis identifier from SNMP/LLDP value.
+
+    Returns ASCII-printable text if valid, formatted MAC address if 6/8 bytes,
+    hex string for other binary octets, or empty string.
+    """
+    return decode_identity(val)
+
+
+_decode_chassis_id = decode_chassis_id
 
 
 def format_mac(val: Any) -> str:
@@ -139,8 +222,8 @@ def format_mac(val: Any) -> str:
         if len(b) in (6, 8):
             return ":".join(f"{x:02x}" for x in b)
         try:
-            text = b.decode("utf-8")
-            if text.isprintable() and len(text) <= 64:
+            text = b.decode("ascii")
+            if text.isprintable() and is_ascii_printable_text(text) and len(text) <= 64:
                 return text
         except (UnicodeDecodeError, Exception):
             pass
@@ -157,7 +240,7 @@ def format_mac(val: Any) -> str:
         cleaned_hex = s.replace("-", "").replace(":", "").replace(".", "").lower()
         if len(cleaned_hex) in (12, 16) and all(c in "0123456789abcdef" for c in cleaned_hex):
             return ":".join(cleaned_hex[i : i + 2] for i in range(0, len(cleaned_hex), 2))
-        if is_printable_text(s) and "b'" not in s:
+        if is_ascii_printable_text(s) and "b'" not in s:
             return s
         return ""
     return ""
