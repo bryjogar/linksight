@@ -3,6 +3,7 @@
 from linksight.capture.system_info import (
     InterfaceConfig,
     _fill_windows,
+    _fill_macos,
     _fill_linux,
 )
 
@@ -233,3 +234,65 @@ def test_windows_run_failing_preserves_psutil_and_reports_unavailable(monkeypatc
             assert cfg.unavailable_reason in full_text
         finally:
             widget.close()
+
+
+def test_macos_failing_command_preserves_psutil_and_does_not_raise(monkeypatch):
+    """A failing command on the macOS path (e.g. no DHCP lease) must not raise and preserves psutil."""
+    import linksight.capture.system_info as si
+
+    for fail_val in [None, ""]:
+        monkeypatch.setattr(si, "_run", lambda cmd, timeout=8: fail_val)
+        cfg = InterfaceConfig(
+            name="en0",
+            mac="aa:bb:cc:dd:ee:ff",
+            ip="192.168.1.50",
+            netmask="255.255.255.0",
+        )
+        # Must not raise AttributeError: 'NoneType' object has no attribute 'splitlines'
+        _fill_macos(cfg, "en0")
+
+        # Psutil-derived values must remain intact
+        assert cfg.ip == "192.168.1.50"
+        assert cfg.netmask == "255.255.255.0"
+        assert cfg.mac == "aa:bb:cc:dd:ee:ff"
+        assert cfg.gateway == ""
+        assert cfg.dns_servers == []
+        assert cfg.dhcp_server == ""
+
+
+def test_windows_powershell_partial_falls_back_to_ipconfig(monkeypatch):
+    """When PowerShell returns address only (no gateway/DNS), ipconfig fallback populates missing fields."""
+    import linksight.capture.system_info as si
+
+    powershell_address_only = r"""
+    {
+        "InterfaceAlias": "Ethernet",
+        "InterfaceIndex": 12,
+        "IPv4Address": {
+            "IPAddress": "192.168.1.42",
+            "PrefixLength": 24
+        }
+    }
+    """
+
+    def fake_run(cmd, timeout=8):
+        if "powershell" in cmd[0]:
+            return powershell_address_only
+        return IPCONFIG_VETHERNET_PRECEDENCE_SAMPLE
+
+    monkeypatch.setattr(si, "_run", fake_run)
+    cfg = InterfaceConfig(
+        name="Ethernet",
+        mac="00:11:22:33:44:55",
+        ip="192.168.1.42",
+        netmask="255.255.255.0",
+    )
+    _fill_windows(cfg, "Ethernet")
+
+    # Gateway, DNS servers and DHCP server end up populated from ipconfig
+    assert cfg.gateway == "192.168.1.1"
+    assert cfg.dns_servers == ["8.8.8.8", "8.8.4.4"]
+    assert cfg.dhcp_server == "192.168.1.254"
+    assert cfg.dhcp_enabled is True
+    assert cfg.unavailable_reason == ""
+

@@ -259,7 +259,7 @@ def _fill_windows(cfg: InterfaceConfig, iface_name: str) -> None:
     ps_out = _run(ps_cmd, timeout=8)
     if ps_out:
         parsed = _parse_powershell_json(ps_out, iface_name)
-        if parsed and (parsed.get("gateway") or parsed.get("dns_servers") or parsed.get("ip")):
+        if parsed:
             if parsed.get("ip"):
                 cfg.ip = parsed["ip"]
             if parsed.get("netmask"):
@@ -272,16 +272,23 @@ def _fill_windows(cfg: InterfaceConfig, iface_name: str) -> None:
                 cfg.dhcp_server = parsed["dhcp_server"]
             if parsed.get("dhcp_enabled") is not None:
                 cfg.dhcp_enabled = parsed["dhcp_enabled"]
-            cfg.unavailable_reason = ""
-            return
+            if parsed.get("gateway") and parsed.get("dns_servers"):
+                cfg.unavailable_reason = ""
+                return
 
     # 2. Fallback: ipconfig /all
     out = _run(["ipconfig", "/all"])
     if out is None:
-        cfg.unavailable_reason = "command failed"
+        if not (cfg.gateway or cfg.dns_servers or cfg.dhcp_server):
+            cfg.unavailable_reason = "command failed"
+        else:
+            cfg.unavailable_reason = ""
         return
     if not out.strip():
-        cfg.unavailable_reason = "no output"
+        if not (cfg.gateway or cfg.dns_servers or cfg.dhcp_server):
+            cfg.unavailable_reason = "no output"
+        else:
+            cfg.unavailable_reason = ""
         return
 
     lines = [l.rstrip() for l in out.splitlines()]
@@ -324,7 +331,10 @@ def _fill_windows(cfg: InterfaceConfig, iface_name: str) -> None:
             target_block = candidates[0][2]
 
     if target_block is None:
-        cfg.unavailable_reason = "adapter not found"
+        if not (cfg.gateway or cfg.dns_servers or cfg.dhcp_server):
+            cfg.unavailable_reason = "adapter not found"
+        else:
+            cfg.unavailable_reason = ""
         return
 
     dhcp_enabled = None
@@ -377,18 +387,30 @@ def _fill_windows(cfg: InterfaceConfig, iface_name: str) -> None:
 def _fill_macos(cfg: InterfaceConfig, iface_name: str) -> None:
     """ipconfig getpacket gives DHCP lease facts (gateway, DNS, server)."""
     out = _run(["ipconfig", "getpacket", iface_name])
+    if out is None or not out.strip():
+        return
     for line in out.splitlines():
         low = line.lower()
         if "yiaddr" in low:
-            cfg.ip = line.split("=")[-1].strip()
+            val = line.split("=")[-1].strip()
+            if val:
+                cfg.ip = val
         elif "subnet mask" in low:
-            cfg.netmask = line.split("=")[-1].strip()
+            val = line.split("=")[-1].strip()
+            if val:
+                cfg.netmask = val
         elif "router" in low and "=" in line:
-            cfg.gateway = line.split("=")[-1].strip()
+            val = line.split("=")[-1].strip()
+            if val:
+                cfg.gateway = val
         elif "domain name server" in low:
-            cfg.dns_servers = [s.strip() for s in line.split("=")[-1].split(",") if s.strip()]
+            vals = [s.strip() for s in line.split("=")[-1].split(",") if s.strip()]
+            if vals:
+                cfg.dns_servers = vals
         elif "server identifier" in low:
-            cfg.dhcp_server = line.split("=")[-1].strip()
+            val = line.split("=")[-1].strip()
+            if val:
+                cfg.dhcp_server = val
         elif "dhcp" in low and "message type" in low:
             cfg.dhcp_enabled = True
 
