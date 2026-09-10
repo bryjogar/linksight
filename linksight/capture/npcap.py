@@ -15,11 +15,14 @@ installer to a temp folder and launch it; the user walks the wizard once.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 import webbrowser
 from pathlib import Path
+
+from .system_info import _safe_run
 
 NPCAP_DOWNLOAD_PAGE = "https://npcap.com/#download"
 # Versioned direct link — check npcap.com for current version periodically.
@@ -31,19 +34,26 @@ NPCAP_INSTALL_DIRS = [
 
 
 def npcap_installed() -> bool | None:
-    """Return True if Npcap is present, False if not, None on non-Windows."""
+    """Return True if Npcap is present, False if not, None on non-Windows or tool failure."""
     if sys.platform != "win32":
         return None
-    try:
-        result = subprocess.run(
-            ["sc", "query", "npcap"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0 and "SERVICE_NAME: npcap" in result.stdout:
-            return True
-    except Exception:
+    tool_failed = False
+    res = _safe_run(["sc", "query", "npcap"], timeout=5, check_returncode=False)
+    if res is None:
+        tool_failed = True
+    elif res.returncode == 0 and "SERVICE_NAME: npcap" in res.stdout:
+        return True
+    elif res.returncode == 1060 or "1060" in (res.stdout + res.stderr):
         pass
-    return any(Path(d).exists() for d in NPCAP_INSTALL_DIRS)
+    else:
+        print(f"[npcap] sc query npcap failed with exit code {res.returncode}")
+        tool_failed = True
+
+    if any(Path(d).exists() for d in NPCAP_INSTALL_DIRS):
+        return True
+    if tool_failed:
+        return None
+    return False
 
 
 def download_installer(dest: Path | None = None, timeout: float = 60.0) -> Path:
@@ -69,11 +79,18 @@ def download_installer(dest: Path | None = None, timeout: float = 60.0) -> Path:
 
 
 def launch_installer(installer_path: Path) -> None:
-    """Launch the Npcap installer. On Windows this triggers the UAC prompt."""
-    subprocess.Popen(
-        [str(installer_path)],
-        cwd=str(installer_path.parent),
-    )
+    """Launch the Npcap installer. On Windows this triggers the UAC prompt and raises to foreground."""
+    if hasattr(os, "startfile"):
+        os.startfile(str(installer_path))
+    else:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
+        kwargs: dict = {
+            "cwd": str(installer_path.parent),
+            "stdin": subprocess.DEVNULL,
+        }
+        if creationflags:
+            kwargs["creationflags"] = creationflags
+        subprocess.Popen([str(installer_path)], **kwargs)
 
 
 def open_download_page() -> None:

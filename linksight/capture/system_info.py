@@ -45,12 +45,38 @@ class InterfaceConfig:
         }
 
 
-def _run(cmd: list[str], timeout: int = 8) -> str:
+def _safe_run(
+    cmd: list[str],
+    timeout: int = 8,
+    check_returncode: bool = True,
+) -> subprocess.CompletedProcess[str] | None:
+    """Run a subprocess detached from invalid console handles on Windows."""
+    kwargs: dict = {
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout,
+        "stdin": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return result.stdout
-    except Exception:
-        return ""
+        result = subprocess.run(cmd, **kwargs)
+        if check_returncode and result.returncode != 0:
+            cmd_name = cmd[0] if cmd else "command"
+            print(f"Command '{cmd_name}' failed with exit code {result.returncode}")
+            return None
+        return result
+    except Exception as exc:
+        cmd_name = cmd[0] if cmd else "command"
+        print(f"Command '{cmd_name}' failed: {exc}")
+        return None
+
+
+def _run(cmd: list[str], timeout: int = 8) -> str | None:
+    res = _safe_run(cmd, timeout=timeout, check_returncode=True)
+    if res is None:
+        return None
+    return res.stdout
 
 
 def get_quick_interface_config(iface_name: str) -> InterfaceConfig:
@@ -97,6 +123,8 @@ def _fill_from_psutil(cfg: InterfaceConfig, iface_name: str) -> None:
 def _fill_windows(cfg: InterfaceConfig, iface_name: str) -> None:
     """Parse ipconfig /all — authoritative for DHCP server + DNS of the lease."""
     out = _run(["ipconfig", "/all"])
+    if not out:
+        return
     lines = [l.rstrip() for l in out.splitlines()]
 
     # find the adapter block
