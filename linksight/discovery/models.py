@@ -8,9 +8,11 @@ from datetime import datetime, timezone
 from ..text_util import (
     decode_text,
     decode_port_id,
+    decode_chassis_id,
     format_mac,
     decode_ip_address,
     is_printable_text,
+    is_ascii_printable_text,
 )
 
 
@@ -116,12 +118,12 @@ class PortDiagnostics:
 
         # Normalize neighbor_chassis
         if isinstance(self.neighbor_chassis, (bytes, bytearray)):
-            self.neighbor_chassis = format_mac(self.neighbor_chassis)
+            self.neighbor_chassis = decode_chassis_id(self.neighbor_chassis)
         elif isinstance(self.neighbor_chassis, str):
             if "b'" in self.neighbor_chassis or 'b"' in self.neighbor_chassis:
-                self.neighbor_chassis = format_mac(self.neighbor_chassis)
-            elif not is_printable_text(self.neighbor_chassis):
-                self.neighbor_chassis = ""
+                self.neighbor_chassis = decode_chassis_id(self.neighbor_chassis)
+            elif not is_ascii_printable_text(self.neighbor_chassis):
+                self.neighbor_chassis = decode_chassis_id(self.neighbor_chassis)
             else:
                 self.neighbor_chassis = self.neighbor_chassis.strip()
         else:
@@ -150,8 +152,8 @@ class PortDiagnostics:
         elif isinstance(self.neighbor_port, str):
             if "b'" in self.neighbor_port or 'b"' in self.neighbor_port:
                 self.neighbor_port = decode_port_id(self.neighbor_port)
-            elif not is_printable_text(self.neighbor_port):
-                self.neighbor_port = ""
+            elif not is_ascii_printable_text(self.neighbor_port):
+                self.neighbor_port = decode_port_id(self.neighbor_port)
             else:
                 self.neighbor_port = self.neighbor_port.strip()
         elif isinstance(self.neighbor_port, (int, float)) and not isinstance(self.neighbor_port, bool):

@@ -192,6 +192,8 @@ class LanInfoWidget(QWidget):
             rows.append(("DHCP observed", net.get("last_message", "")))
         if net.get("domain"):
             rows.append(("Domain", net.get("domain", "")))
+        if cfg and getattr(cfg, "unavailable_reason", ""):
+            rows.append(("OS config", f"unavailable — {cfg.unavailable_reason}"))
 
         self._render(rows)
 

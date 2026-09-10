@@ -3,6 +3,7 @@
 from linksight.capture.system_info import (
     InterfaceConfig,
     _fill_windows,
+    _fill_macos,
     _fill_linux,
 )
 
@@ -89,7 +90,209 @@ def test_linux_gateway_and_dns(tmp_path, monkeypatch):
 
 
 def test_config_to_dict():
-    cfg = InterfaceConfig(name="eth0", ip="10.0.0.42", dns_servers=["8.8.8.8"])
+    cfg = InterfaceConfig(name="eth0", ip="10.0.0.42", dns_servers=["8.8.8.8"], unavailable_reason="no output")
     d = cfg.to_dict()
     assert d["ip"] == "10.0.0.42"
     assert d["dns_servers"] == ["8.8.8.8"]
+    assert d["unavailable_reason"] == "no output"
+
+
+POWERSHELL_SAMPLE = r"""
+{
+    "InterfaceAlias": "Ethernet",
+    "InterfaceIndex": 12,
+    "IPv4Address": {
+        "IPAddress": "192.168.1.150",
+        "PrefixLength": 24
+    },
+    "IPv4DefaultGateway": {
+        "NextHop": "192.168.1.1"
+    },
+    "DNSServer": {
+        "ServerAddresses": [
+            "1.1.1.1",
+            "1.0.0.1"
+        ]
+    },
+    "DhcpServer": "192.168.1.1",
+    "NetIPv4Interface": {
+        "DHCP": "Enabled"
+    }
+}
+"""
+
+IPCONFIG_VETHERNET_PRECEDENCE_SAMPLE = r"""
+Windows IP Configuration
+
+Ethernet adapter vEthernet (Default Switch):
+
+   Connection-specific DNS Suffix  . :
+   Description . . . . . . . . . . . : Hyper-V Virtual Ethernet Adapter
+   Physical Address. . . . . . . . . : 00-15-5D-12-34-56
+   DHCP Enabled. . . . . . . . . . . : No
+   Autoconfiguration Enabled . . . . : Yes
+   IPv4 Address. . . . . . . . . . . : 172.28.16.1(Preferred)
+   Subnet Mask . . . . . . . . . . . : 255.255.240.0
+   Default Gateway . . . . . . . . . :
+   NetBIOS over Tcpip. . . . . . . . : Enabled
+
+Ethernet adapter Ethernet:
+
+   Connection-specific DNS Suffix  . : corp.local
+   Description . . . . . . . . . . . : Intel(R) Ethernet Connection I219-LM
+   Physical Address. . . . . . . . . : 00-11-22-33-44-55
+   DHCP Enabled. . . . . . . . . . . : Yes
+   Autoconfiguration Enabled . . . . : Yes
+   IPv4 Address. . . . . . . . . . . : 192.168.1.42(Preferred)
+   Subnet Mask . . . . . . . . . . . : 255.255.255.0
+   Default Gateway . . . . . . . . . : 192.168.1.1
+   DHCP Server . . . . . . . . . . . : 192.168.1.254
+   DNS Servers . . . . . . . . . . . : 8.8.8.8
+                                       8.8.4.4
+   NetBIOS over Tcpip. . . . . . . . : Enabled
+"""
+
+
+def test_windows_powershell_happy_path(monkeypatch):
+    """PowerShell Get-NetIPConfiguration parses IPv4, mask, gateway, DNS, and DHCP."""
+    import linksight.capture.system_info as si
+
+    monkeypatch.setattr(si, "_run", lambda cmd, timeout=8: POWERSHELL_SAMPLE if "powershell" in cmd[0] else None)
+    cfg = InterfaceConfig(name="Ethernet")
+    _fill_windows(cfg, "Ethernet")
+
+    assert cfg.ip == "192.168.1.150"
+    assert cfg.netmask == "255.255.255.0"
+    assert cfg.gateway == "192.168.1.1"
+    assert cfg.dns_servers == ["1.1.1.1", "1.0.0.1"]
+    assert cfg.dhcp_server == "192.168.1.1"
+    assert cfg.dhcp_enabled is True
+    assert cfg.unavailable_reason == ""
+
+
+def test_windows_ipconfig_vethernet_precedence(monkeypatch):
+    """Exact header match must select 'Ethernet' over preceding 'vEthernet (Default Switch)'."""
+    import linksight.capture.system_info as si
+
+    def fake_run(cmd, timeout=8):
+        if "powershell" in cmd[0]:
+            return None  # fall through to ipconfig
+        return IPCONFIG_VETHERNET_PRECEDENCE_SAMPLE
+
+    monkeypatch.setattr(si, "_run", fake_run)
+    cfg = InterfaceConfig(name="Ethernet")
+    _fill_windows(cfg, "Ethernet")
+
+    assert cfg.ip == "192.168.1.42"
+    assert cfg.netmask == "255.255.255.0"
+    assert cfg.gateway == "192.168.1.1"
+    assert cfg.dhcp_server == "192.168.1.254"
+    assert cfg.dns_servers == ["8.8.8.8", "8.8.4.4"]
+    assert cfg.dhcp_enabled is True
+    assert cfg.unavailable_reason == ""
+
+
+def test_windows_run_failing_preserves_psutil_and_reports_unavailable(monkeypatch):
+    """When subprocess fails or returns empty, psutil data survives and unavailable is reported."""
+    import linksight.capture.system_info as si
+    from PySide6.QtWidgets import QApplication, QLabel
+    from linksight.ui.lan_info_widget import LanInfoWidget
+
+    app = QApplication.instance() or QApplication([])
+
+    for fail_val in [None, ""]:
+        monkeypatch.setattr(si, "_run", lambda cmd, timeout=8: fail_val)
+        cfg = InterfaceConfig(
+            name="Ethernet",
+            mac="00:11:22:33:44:55",
+            ip="192.168.1.10",
+            netmask="255.255.255.0",
+        )
+        _fill_windows(cfg, "Ethernet")
+
+        # Psutil values survived
+        assert cfg.ip == "192.168.1.10"
+        assert cfg.netmask == "255.255.255.0"
+        assert cfg.mac == "00:11:22:33:44:55"
+        # Gateway / DNS / DHCP were not populated
+        assert cfg.gateway == ""
+        assert cfg.dns_servers == []
+        assert cfg.dhcp_server == ""
+        # Explicit unavailable reason is set
+        assert cfg.unavailable_reason in ("command failed", "no output")
+
+        # UI panel displays the unavailable state
+        widget = LanInfoWidget()
+        try:
+            widget._cached_cfg = cfg
+            widget._iface_name = "Ethernet"
+            widget._render_current()
+
+            labels = [lbl.text() for lbl in widget.findChildren(QLabel)]
+            full_text = " ".join(labels)
+            assert "OS config unavailable" in full_text
+            assert cfg.unavailable_reason in full_text
+        finally:
+            widget.close()
+
+
+def test_macos_failing_command_preserves_psutil_and_does_not_raise(monkeypatch):
+    """A failing command on the macOS path (e.g. no DHCP lease) must not raise and preserves psutil."""
+    import linksight.capture.system_info as si
+
+    for fail_val in [None, ""]:
+        monkeypatch.setattr(si, "_run", lambda cmd, timeout=8: fail_val)
+        cfg = InterfaceConfig(
+            name="en0",
+            mac="aa:bb:cc:dd:ee:ff",
+            ip="192.168.1.50",
+            netmask="255.255.255.0",
+        )
+        # Must not raise AttributeError: 'NoneType' object has no attribute 'splitlines'
+        _fill_macos(cfg, "en0")
+
+        # Psutil-derived values must remain intact
+        assert cfg.ip == "192.168.1.50"
+        assert cfg.netmask == "255.255.255.0"
+        assert cfg.mac == "aa:bb:cc:dd:ee:ff"
+        assert cfg.gateway == ""
+        assert cfg.dns_servers == []
+        assert cfg.dhcp_server == ""
+
+
+def test_windows_powershell_partial_falls_back_to_ipconfig(monkeypatch):
+    """When PowerShell returns address only (no gateway/DNS), ipconfig fallback populates missing fields."""
+    import linksight.capture.system_info as si
+
+    powershell_address_only = r"""
+    {
+        "InterfaceAlias": "Ethernet",
+        "InterfaceIndex": 12,
+        "IPv4Address": {
+            "IPAddress": "192.168.1.42",
+            "PrefixLength": 24
+        }
+    }
+    """
+
+    def fake_run(cmd, timeout=8):
+        if "powershell" in cmd[0]:
+            return powershell_address_only
+        return IPCONFIG_VETHERNET_PRECEDENCE_SAMPLE
+
+    monkeypatch.setattr(si, "_run", fake_run)
+    cfg = InterfaceConfig(
+        name="Ethernet",
+        mac="00:11:22:33:44:55",
+        ip="192.168.1.42",
+        netmask="255.255.255.0",
+    )
+    _fill_windows(cfg, "Ethernet")
+
+    # Gateway, DNS servers and DHCP server end up populated from ipconfig
+    assert cfg.gateway == "192.168.1.1"
+    assert cfg.dns_servers == ["8.8.8.8", "8.8.4.4"]
+    assert cfg.dhcp_server == "192.168.1.254"
+    assert cfg.dhcp_enabled is True
+    assert cfg.unavailable_reason == ""
+

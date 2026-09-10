@@ -112,3 +112,45 @@ def test_extract_platform_cisco():
 
 def test_extract_platform_short():
     assert extract_platform("netgear GS108") == "netgear GS108"
+
+
+def test_identity_decoding_rejects_cyrillic_mojibake():
+    """Binary chassis/port IDs must not decode as Cyrillic or latin-1 text."""
+    from linksight.text_util import decode_port_id, decode_chassis_id, decode_text
+
+    cyrillic_bytes = b"\xd0\xa0\xd0\xb0\xd1\x81"  # 6 bytes
+    latin1_bytes = b"\xc0\xc1\xc2\xd0\xe0"       # 5 bytes
+    ascii_port = b"Gi1/0/24"
+
+    # Human-readable fields still decode leniently
+    assert decode_text(cyrillic_bytes) == "Рас"
+    assert decode_text(latin1_bytes) == "ÀÁÂÐà"
+
+    # Identity fields must never return Cyrillic / mojibake text
+    # 6 bytes -> MAC formatting
+    assert decode_port_id(cyrillic_bytes) == "d0:a0:d0:b0:d1:81"
+    assert decode_chassis_id(cyrillic_bytes) == "d0:a0:d0:b0:d1:81"
+    assert "Рас" not in decode_port_id(cyrillic_bytes)
+
+    # 5 bytes -> hex formatting
+    assert decode_port_id(latin1_bytes) == "c0c1c2d0e0"
+    assert decode_chassis_id(latin1_bytes) == "c0c1c2d0e0"
+    assert "À" not in decode_port_id(latin1_bytes)
+
+    # Clean ASCII remains text
+    assert decode_port_id(ascii_port) == "Gi1/0/24"
+    assert decode_chassis_id(ascii_port) == "Gi1/0/24"
+
+
+def test_lldp_binary_port_id_not_decoded_as_cyrillic():
+    """LLDP frame with binary port ID that matches UTF-8 Cyrillic does not render as Russian text."""
+    body = b""
+    body += _tlv(1, b"\x04" + bytes.fromhex("001a2b3c4d5e"))
+    body += _tlv(2, b"\x05\xd0\xa0\xd0\xb0\xd1\x81")
+    body += _tlv(3, (120).to_bytes(2, "big"))
+    body += _tlv(0, b"")
+    frame = eth(LLDP_DST, "00:1a:2b:3c:4d:5e", 0x88CC, body)
+    dev = parse_lldp_frame(frame, "eth0")
+    assert dev is not None
+    assert dev.port_id == "d0:a0:d0:b0:d1:81"
+    assert "Рас" not in dev.port_id

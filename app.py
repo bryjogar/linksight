@@ -9,6 +9,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
 import time as _time
 
@@ -44,9 +46,59 @@ def _version_suffix() -> str:
         return ""
 
 
+def ensure_elevated(argv: list[str] | None = None) -> None:
+    """Ensure the process is running with administrator privileges on Windows.
+
+    When running un-elevated (e.g. from source), relaunches self via ShellExecuteW
+    with 'runas' to prompt for UAC elevation. If elevation is declined or fails,
+    exits immediately with an ASCII message to avoid relaunch loops.
+    """
+    if sys.platform != "win32":
+        return
+
+    try:
+        import ctypes
+
+        is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        is_admin = False
+
+    if is_admin:
+        return
+
+    current_args = list(sys.argv[1:] if argv is None else argv)
+    if "--no-relaunch" in current_args:
+        print("LinkSight requires administrator privileges on Windows for packet capture.", file=sys.stderr)
+        sys.exit(1)
+
+    filtered_args = [a for a in current_args if a != "--no-relaunch"]
+    filtered_args.append("--no-relaunch")
+
+    if getattr(sys, "frozen", False):
+        params = subprocess.list2cmdline(filtered_args)
+    else:
+        script = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else "app.py"
+        params = subprocess.list2cmdline([script] + filtered_args)
+
+    try:
+        ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
+    except Exception as exc:
+        print(f"Failed to elevate privileges: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if ret <= 32:
+        print("LinkSight requires administrator privileges on Windows for packet capture.", file=sys.stderr)
+        sys.exit(1)
+
+    sys.exit(0)
+
+
 def main(argv: list[str] | None = None) -> int:
+    ensure_elevated(argv)
+
     parser = argparse.ArgumentParser(prog="linksight", description="LLDP/CDP neighbor discovery")
     parser.add_argument("--demo", action="store_true", help="replay simulated frames (no capture privileges needed)")
+    parser.add_argument("--no-relaunch", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     _set_windows_app_id()

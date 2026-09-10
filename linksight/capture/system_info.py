@@ -31,6 +31,7 @@ class InterfaceConfig:
     dns_servers: list[str] = field(default_factory=list)
     dhcp_server: str = ""
     dhcp_enabled: bool | None = None
+    unavailable_reason: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -42,15 +43,42 @@ class InterfaceConfig:
             "dns_servers": self.dns_servers,
             "dhcp_server": self.dhcp_server,
             "dhcp_enabled": self.dhcp_enabled,
+            "unavailable_reason": self.unavailable_reason,
         }
 
 
-def _run(cmd: list[str], timeout: int = 8) -> str:
+def _safe_run(
+    cmd: list[str],
+    timeout: int = 8,
+    check_returncode: bool = True,
+) -> subprocess.CompletedProcess[str] | None:
+    """Run a subprocess detached from invalid console handles on Windows."""
+    kwargs: dict = {
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout,
+        "stdin": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return result.stdout
-    except Exception:
-        return ""
+        result = subprocess.run(cmd, **kwargs)
+        if check_returncode and result.returncode != 0:
+            cmd_name = cmd[0] if cmd else "command"
+            print(f"Command '{cmd_name}' failed with exit code {result.returncode}")
+            return None
+        return result
+    except Exception as exc:
+        cmd_name = cmd[0] if cmd else "command"
+        print(f"Command '{cmd_name}' failed: {exc}")
+        return None
+
+
+def _run(cmd: list[str], timeout: int = 8) -> str | None:
+    res = _safe_run(cmd, timeout=timeout, check_returncode=True)
+    if res is None:
+        return None
+    return res.stdout
 
 
 def get_quick_interface_config(iface_name: str) -> InterfaceConfig:
@@ -94,67 +122,295 @@ def _fill_from_psutil(cfg: InterfaceConfig, iface_name: str) -> None:
         pass
 
 
+def _prefix_to_netmask(prefix: int | str) -> str:
+    try:
+        import ipaddress
+        p = int(prefix)
+        if 0 <= p <= 32:
+            return str(ipaddress.IPv4Network(f"0.0.0.0/{p}").netmask)
+    except Exception:
+        pass
+    return ""
+
+
+def _parse_powershell_json(json_str: str, iface_name: str) -> dict | None:
+    import json
+    try:
+        data = json.loads(json_str)
+    except Exception:
+        return None
+
+    # Parse defensively: single object vs list
+    item = None
+    if isinstance(data, list):
+        for candidate in data:
+            if isinstance(candidate, dict):
+                alias = candidate.get("InterfaceAlias", "")
+                if str(alias).lower() == iface_name.lower():
+                    item = candidate
+                    break
+        if item is None and len(data) == 1 and isinstance(data[0], dict):
+            item = data[0]
+    elif isinstance(data, dict):
+        item = data
+
+    if item is None or not isinstance(item, dict):
+        return None
+
+    res: dict = {}
+
+    # IPv4 address & netmask
+    ipv4_info = item.get("IPv4Address")
+    if isinstance(ipv4_info, list):
+        for entry in ipv4_info:
+            if isinstance(entry, dict) and entry.get("IPAddress"):
+                res["ip"] = str(entry.get("IPAddress"))
+                if entry.get("PrefixLength") is not None:
+                    res["netmask"] = _prefix_to_netmask(entry.get("PrefixLength"))
+                break
+            elif isinstance(entry, str) and "." in entry:
+                res["ip"] = entry
+                break
+    elif isinstance(ipv4_info, dict):
+        if ipv4_info.get("IPAddress"):
+            res["ip"] = str(ipv4_info.get("IPAddress"))
+        if ipv4_info.get("PrefixLength") is not None:
+            res["netmask"] = _prefix_to_netmask(ipv4_info.get("PrefixLength"))
+    elif isinstance(ipv4_info, str) and "." in ipv4_info:
+        res["ip"] = ipv4_info
+
+    # Default gateway -> NextHop
+    gw_info = item.get("IPv4DefaultGateway")
+    if isinstance(gw_info, list):
+        for entry in gw_info:
+            if isinstance(entry, dict) and entry.get("NextHop"):
+                res["gateway"] = str(entry.get("NextHop"))
+                break
+            elif isinstance(entry, str) and "." in entry:
+                res["gateway"] = entry
+                break
+    elif isinstance(gw_info, dict):
+        if gw_info.get("NextHop"):
+            res["gateway"] = str(gw_info.get("NextHop"))
+        elif gw_info.get("IPAddress"):
+            res["gateway"] = str(gw_info.get("IPAddress"))
+    elif isinstance(gw_info, str) and "." in gw_info:
+        res["gateway"] = gw_info
+
+    # DNS servers -> ServerAddresses
+    dns_info = item.get("DNSServer")
+    dns_list: list[str] = []
+    if isinstance(dns_info, list):
+        for entry in dns_info:
+            if isinstance(entry, dict):
+                addrs = entry.get("ServerAddresses")
+                if isinstance(addrs, list):
+                    dns_list.extend(str(a) for a in addrs if a)
+                elif isinstance(addrs, str) and addrs:
+                    dns_list.append(addrs)
+            elif isinstance(entry, str) and entry:
+                dns_list.append(entry)
+    elif isinstance(dns_info, dict):
+        addrs = dns_info.get("ServerAddresses")
+        if isinstance(addrs, list):
+            dns_list.extend(str(a) for a in addrs if a)
+        elif isinstance(addrs, str) and addrs:
+            dns_list.append(addrs)
+    elif isinstance(dns_info, str) and dns_info:
+        dns_list.append(dns_info)
+    if dns_list:
+        res["dns_servers"] = [d for d in dns_list if "." in d or ":" in d]
+
+    # DHCP server
+    dhcp_info = item.get("DhcpServer") or item.get("DHCPServer")
+    if isinstance(dhcp_info, dict):
+        res["dhcp_server"] = str(dhcp_info.get("ServerAddress") or dhcp_info.get("IPAddress") or "")
+    elif isinstance(dhcp_info, str) and dhcp_info:
+        res["dhcp_server"] = dhcp_info
+
+    # DHCP enabled
+    net_ipv4 = item.get("NetIPv4Interface")
+    if isinstance(net_ipv4, dict):
+        dhcp_val = net_ipv4.get("DHCP") or net_ipv4.get("Dhcp")
+        if isinstance(dhcp_val, str):
+            res["dhcp_enabled"] = dhcp_val.lower().startswith("enable")
+        elif isinstance(dhcp_val, bool):
+            res["dhcp_enabled"] = dhcp_val
+    elif "Dhcp" in item or "DHCP" in item:
+        dhcp_val = item.get("Dhcp") or item.get("DHCP")
+        if isinstance(dhcp_val, str):
+            res["dhcp_enabled"] = dhcp_val.lower().startswith("enable")
+        elif isinstance(dhcp_val, bool):
+            res["dhcp_enabled"] = dhcp_val
+
+    return res
+
+
 def _fill_windows(cfg: InterfaceConfig, iface_name: str) -> None:
-    """Parse ipconfig /all — authoritative for DHCP server + DNS of the lease."""
+    """Read Windows interface configuration using PowerShell or ipconfig fallback."""
+    # 1. PowerShell: Get-NetIPConfiguration
+    ps_alias = iface_name.replace("'", "''")
+    ps_cmd = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        f"Get-NetIPConfiguration -InterfaceAlias '{ps_alias}' | ConvertTo-Json",
+    ]
+    ps_out = _run(ps_cmd, timeout=8)
+    if ps_out:
+        parsed = _parse_powershell_json(ps_out, iface_name)
+        if parsed:
+            if parsed.get("ip"):
+                cfg.ip = parsed["ip"]
+            if parsed.get("netmask"):
+                cfg.netmask = parsed["netmask"]
+            if parsed.get("gateway"):
+                cfg.gateway = parsed["gateway"]
+            if parsed.get("dns_servers"):
+                cfg.dns_servers = parsed["dns_servers"]
+            if parsed.get("dhcp_server"):
+                cfg.dhcp_server = parsed["dhcp_server"]
+            if parsed.get("dhcp_enabled") is not None:
+                cfg.dhcp_enabled = parsed["dhcp_enabled"]
+            if parsed.get("gateway") and parsed.get("dns_servers"):
+                cfg.unavailable_reason = ""
+                return
+
+    # 2. Fallback: ipconfig /all
     out = _run(["ipconfig", "/all"])
+    if out is None:
+        if not (cfg.gateway or cfg.dns_servers or cfg.dhcp_server):
+            cfg.unavailable_reason = "command failed"
+        else:
+            cfg.unavailable_reason = ""
+        return
+    if not out.strip():
+        if not (cfg.gateway or cfg.dns_servers or cfg.dhcp_server):
+            cfg.unavailable_reason = "no output"
+        else:
+            cfg.unavailable_reason = ""
+        return
+
     lines = [l.rstrip() for l in out.splitlines()]
 
-    # find the adapter block
-    start = None
-    for i, line in enumerate(lines):
-        if iface_name.lower() in line.lower() and "adapter" in line.lower():
-            start = i
-            break
-    if start is None:
-        return
-    block: list[str] = []
-    for line in lines[start:]:
-        if "adapter" in line.lower() and block:
-            break
-        block.append(line)
+    # Collect adapter blocks
+    blocks: list[tuple[str, list[str]]] = []
+    current_name = ""
+    current_lines: list[str] = []
+    for line in lines:
+        low = line.lower()
+        if "adapter" in low and ":" in line:
+            if current_name and current_lines:
+                blocks.append((current_name, current_lines))
+            idx = low.find("adapter")
+            header_after = line[idx + len("adapter") :].strip().rstrip(":")
+            current_name = header_after
+            current_lines = [line]
+        elif current_name:
+            current_lines.append(line)
+    if current_name and current_lines:
+        blocks.append((current_name, current_lines))
 
-    for i, line in enumerate(block):
+    # Match block: exact match first
+    target_block: list[str] | None = None
+    for name, blk in blocks:
+        if name.strip().lower() == iface_name.strip().lower():
+            target_block = blk
+            break
+
+    # Fallback to substring match, without taking the first hit blindly
+    if target_block is None:
+        candidates = []
+        for name, blk in blocks:
+            if iface_name.lower() in name.lower():
+                is_disconnected = any("media disconnected" in l.lower() for l in blk)
+                has_ip = any("ipv4 address" in l.lower() or "ip address" in l.lower() for l in blk)
+                candidates.append((not is_disconnected, has_ip, blk))
+        if candidates:
+            candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+            target_block = candidates[0][2]
+
+    if target_block is None:
+        if not (cfg.gateway or cfg.dns_servers or cfg.dhcp_server):
+            cfg.unavailable_reason = "adapter not found"
+        else:
+            cfg.unavailable_reason = ""
+        return
+
+    dhcp_enabled = None
+    ip = ""
+    netmask = ""
+    gateway = ""
+    dhcp_server = ""
+    dns_servers: list[str] = []
+
+    for i, line in enumerate(target_block):
         low = line.lower()
         val = line.split(":", 1)[1].strip() if ":" in line else ""
         if "dhcp enabled" in low:
-            cfg.dhcp_enabled = val.lower().startswith("yes")
+            dhcp_enabled = val.lower().startswith("yes")
         elif "ipv4 address" in low or "ip address" in low:
-            cfg.ip = val.split("(")[0].strip()
+            ip = val.split("(")[0].strip()
         elif "subnet mask" in low:
-            cfg.netmask = val.split("(")[0].strip()
+            netmask = val.split("(")[0].strip()
         elif "default gateway" in low:
-            cfg.gateway = val.split("(")[0].strip()
+            gateway = val.split("(")[0].strip()
         elif "dhcp server" in low:
-            cfg.dhcp_server = val.split("(")[0].strip()
+            dhcp_server = val.split("(")[0].strip()
         elif "dns servers" in low or "dns server" in low:
-            cfg.dns_servers.append(val.split("(")[0].strip())
-            # ipconfig lists additional DNS servers on continuation lines:
-            # "                                       1.1.1.1"
-            for cont in block[i + 1 :]:
+            if val:
+                dns_servers.append(val.split("(")[0].strip())
+            for cont in target_block[i + 1 :]:
                 cval = cont.split(":", 1)[1].strip() if ":" in cont else cont.strip()
                 if not cval or ":" not in cont:
-                    # continuation line looks like whitespace + IP, no label
-                    if cval and cval[0].isdigit():
-                        cfg.dns_servers.append(cval.split("(")[0].strip())
+                    if cval and (cval[0].isdigit() or ":" in cval):
+                        dns_servers.append(cval.split("(")[0].strip())
                         continue
                 break
+
+    # Fill ONLY non-empty results — keep what psutil already provided
+    if ip:
+        cfg.ip = ip
+    if netmask:
+        cfg.netmask = netmask
+    if gateway:
+        cfg.gateway = gateway
+    if dhcp_server:
+        cfg.dhcp_server = dhcp_server
+    if dns_servers:
+        cfg.dns_servers = dns_servers
+    if dhcp_enabled is not None:
+        cfg.dhcp_enabled = dhcp_enabled
+    cfg.unavailable_reason = ""
 
 
 def _fill_macos(cfg: InterfaceConfig, iface_name: str) -> None:
     """ipconfig getpacket gives DHCP lease facts (gateway, DNS, server)."""
     out = _run(["ipconfig", "getpacket", iface_name])
+    if out is None or not out.strip():
+        return
     for line in out.splitlines():
         low = line.lower()
         if "yiaddr" in low:
-            cfg.ip = line.split("=")[-1].strip()
+            val = line.split("=")[-1].strip()
+            if val:
+                cfg.ip = val
         elif "subnet mask" in low:
-            cfg.netmask = line.split("=")[-1].strip()
+            val = line.split("=")[-1].strip()
+            if val:
+                cfg.netmask = val
         elif "router" in low and "=" in line:
-            cfg.gateway = line.split("=")[-1].strip()
+            val = line.split("=")[-1].strip()
+            if val:
+                cfg.gateway = val
         elif "domain name server" in low:
-            cfg.dns_servers = [s.strip() for s in line.split("=")[-1].split(",") if s.strip()]
+            vals = [s.strip() for s in line.split("=")[-1].split(",") if s.strip()]
+            if vals:
+                cfg.dns_servers = vals
         elif "server identifier" in low:
-            cfg.dhcp_server = line.split("=")[-1].strip()
+            val = line.split("=")[-1].strip()
+            if val:
+                cfg.dhcp_server = val
         elif "dhcp" in low and "message type" in low:
             cfg.dhcp_enabled = True
 
