@@ -167,6 +167,27 @@ def test_parse_ping_result_command_unavailable():
     assert res.message == "command unavailable"
 
 
+def test_parse_ping_result_nonzero_empty_output():
+    """Non-zero exit with empty output and no matched token reports timeout/no-reply."""
+    proc = subprocess.CompletedProcess(args=["ping"], returncode=1, stdout="", stderr="")
+    res = parse_ping_result("8.8.8.8", proc)
+    assert res.status == "timeout"
+    assert res.message == "no reply (ICMP may be blocked)"
+
+
+def test_parse_ping_result_exit_code_127_unavailable():
+    """Missing ping binary exiting 127 reports unavailable."""
+    proc_empty = subprocess.CompletedProcess(args=["ping"], returncode=127, stdout="", stderr="")
+    res_empty = parse_ping_result("8.8.8.8", proc_empty)
+    assert res_empty.status == "unavailable"
+    assert res_empty.message == "command unavailable"
+
+    proc_msg = subprocess.CompletedProcess(args=["ping"], returncode=127, stdout="", stderr="/bin/sh: ping: not found\n")
+    res_msg = parse_ping_result("8.8.8.8", proc_msg)
+    assert res_msg.status == "unavailable"
+    assert res_msg.message == "command unavailable"
+
+
 def test_parse_ping_result_no_gateway():
     """Missing gateway target reports 'not checked (no gateway known)', not failed."""
     for empty_target in (None, "", "   ", "0.0.0.0"):

@@ -143,6 +143,18 @@ def parse_ping_result(
 
     # 4. Fallback for non-zero exit code
     if proc.returncode != 0:
+        if proc.returncode == 127:
+            return LinkCheckResult(
+                target=target,
+                status="unavailable",
+                message="command unavailable",
+            )
+        if not out.strip():
+            return LinkCheckResult(
+                target=target,
+                status="timeout",
+                message="no reply (ICMP may be blocked)",
+            )
         return LinkCheckResult(
             target=target,
             status="unreachable",
