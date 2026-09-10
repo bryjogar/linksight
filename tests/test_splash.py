@@ -55,3 +55,65 @@ def test_main_window_init_hook_reports_ascending_stages():
     finally:
         controller.close()
         window.close()
+
+
+def test_splash_drops_topmost_flag_on_close():
+    """Splash screen must be WindowStaysOnTopHint during boot, but drop it when closed."""
+    from PySide6.QtCore import Qt
+
+    app = QApplication.instance() or QApplication([])
+    splash = SplashScreen()
+    try:
+        assert bool(splash.windowFlags() & Qt.WindowStaysOnTopHint)
+        splash.close()
+        assert not bool(splash.windowFlags() & Qt.WindowStaysOnTopHint)
+    finally:
+        splash.close()
+
+
+def test_install_path_hides_splash_first(monkeypatch):
+    """The Npcap install path must hide the splash before launching installer."""
+    from pathlib import Path
+    from PySide6.QtWidgets import QMessageBox
+    from linksight.ui.settings_widget import SettingsWidget
+
+    app = QApplication.instance() or QApplication([])
+    controller = AppController()
+    settings = SettingsWidget(controller)
+
+    splash = SplashScreen()
+    splash.show()
+    assert splash.isVisible()
+
+    splash_hidden_during_launch = []
+
+    def fake_launch(path):
+        splash_hidden_during_launch.append(not splash.isVisible())
+
+    import sys
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr("linksight.capture.npcap.download_installer", lambda **k: Path("/fake/installer.exe"))
+    monkeypatch.setattr("linksight.capture.npcap.npcap_installed", lambda: False)
+    monkeypatch.setattr("linksight.capture.npcap.launch_installer", fake_launch)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+
+    try:
+        settings._install_npcap()
+        # Process events and wait for completion
+        for _ in range(100):
+            app.processEvents()
+            if splash_hidden_during_launch:
+                break
+            import time
+            time.sleep(0.01)
+
+        assert splash_hidden_during_launch == [True]
+        assert not splash.isVisible()
+    finally:
+        # Give worker a moment to clean up if active
+        app.processEvents()
+        splash.close()
+        controller.close()
+        settings.close()
+        app.processEvents()

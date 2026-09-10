@@ -80,6 +80,11 @@ def download_installer(dest: Path | None = None, timeout: float = 60.0) -> Path:
 
 def launch_installer(installer_path: Path) -> None:
     """Launch the Npcap installer. On Windows this triggers the UAC prompt and raises to foreground."""
+    try:
+        from ..ui.splash import SplashScreen
+        SplashScreen.hide_active()
+    except Exception:
+        pass
     if hasattr(os, "startfile"):
         os.startfile(str(installer_path))
     else:

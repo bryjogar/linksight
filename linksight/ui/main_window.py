@@ -396,6 +396,8 @@ class MainWindow(QMainWindow):
             if sys.platform == "win32":
                 from ..capture import npcap
                 if npcap.npcap_installed() is False:
+                    from .splash import SplashScreen
+                    SplashScreen.hide_active()
                     ret = QMessageBox.warning(
                         self,
                         "LinkSight — Npcap required",

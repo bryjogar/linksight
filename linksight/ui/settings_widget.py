@@ -106,6 +106,7 @@ class SettingsWidget(QWidget):
         def _on_done(path, error):
             progress.close()
             worker.deleteLater()
+            self._download_worker = None
             if error is not None:
                 _show_failure(str(error))
                 return
@@ -121,6 +122,8 @@ class SettingsWidget(QWidget):
                 f"Installer: {path}",
             )
             if ret == QMessageBox.StandardButton.Yes:
+                from .splash import SplashScreen
+                SplashScreen.hide_active()
                 npcap.launch_installer(path)
             QMessageBox.information(
                 self,
@@ -147,5 +150,15 @@ class SettingsWidget(QWidget):
                 QDesktopServices.openUrl(QUrl(npcap.NPCAP_DOWNLOAD_PAGE))
 
         worker.done.connect(_on_done)
+        self._download_worker = worker
         worker.start()
+
+    def closeEvent(self, event) -> None:
+        try:
+            worker = getattr(self, "_download_worker", None)
+            if worker is not None and worker.isRunning():
+                worker.wait(2000)
+        except (RuntimeError, Exception):
+            pass
+        super().closeEvent(event)
 

@@ -10,7 +10,14 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QFrame, QLabel, QProgressBar, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QLabel,
+    QProgressBar,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .theme import ACCENT, BG, BORDER_STRONG, FG, FG_DIM, FG_FAINT, MONO
 
@@ -18,8 +25,11 @@ from .theme import ACCENT, BG, BORDER_STRONG, FG, FG_DIM, FG_FAINT, MONO
 class SplashScreen(QWidget):
     """Frameless launch window with a live status line and progress bar."""
 
+    _active_instance: SplashScreen | None = None
+
     def __init__(self, subtitle: str = "", parent=None):
         super().__init__(parent, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        SplashScreen._active_instance = self
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(480, 220)
 
@@ -86,3 +96,33 @@ class SplashScreen(QWidget):
                 geo.y() + (geo.height() - self.height()) // 2,
             )
         self.show()
+
+    def close(self) -> bool:
+        """Close the splash window and drop the always-on-top flag."""
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+        if SplashScreen._active_instance is self:
+            SplashScreen._active_instance = None
+        return super().close()
+
+    def closeEvent(self, event) -> None:
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+        if SplashScreen._active_instance is self:
+            SplashScreen._active_instance = None
+        super().closeEvent(event)
+
+    @classmethod
+    def hide_active(cls) -> SplashScreen | None:
+        """Hide any active splash screen so no always-on-top window is up."""
+        inst = cls._active_instance
+        if inst is not None and inst.isVisible():
+            inst.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+            inst.hide()
+            return inst
+        app = QApplication.instance()
+        if app is not None:
+            for widget in app.topLevelWidgets():
+                if isinstance(widget, cls) and widget.isVisible():
+                    widget.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+                    widget.hide()
+                    return widget
+        return None
