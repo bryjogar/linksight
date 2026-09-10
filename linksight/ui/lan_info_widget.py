@@ -8,16 +8,21 @@ from PySide6.QtCore import Qt, Signal, QTimer, QThread
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, QLabel,
                                QGroupBox, QSizePolicy)
 
+from typing import Any
 from ..capture.system_info import (
     get_interface_config,
     get_quick_interface_config,
     InterfaceConfig,
 )
+from ..capture.link_checks import (
+    LinkCheckResult,
+    run_all_link_checks,
+)
 from ..capture.oui_lookup import lookup_vendor
-from .theme import FG, FG_DIM, FG_FAINT, ACCENT, MONO
+from .theme import FG, FG_DIM, FG_FAINT, ACCENT, OK, WARN, DANGER, MONO
 
 
-def _row(label: str, value: str):
+def _row(label: str, value: str, color: str | None = None):
     lbl = QLabel(label)
     lbl.setStyleSheet(f"color: {FG_DIM}; font-weight: 500;")
     val = QLabel(value if value else "—")
@@ -25,7 +30,8 @@ def _row(label: str, value: str):
     val.setObjectName("mono")
     val.setWordWrap(True)
     if value:
-        val.setStyleSheet(f"color: {ACCENT}; font-family: {MONO}; font-weight: 600;")
+        c = color or ACCENT
+        val.setStyleSheet(f"color: {c}; font-family: {MONO}; font-weight: 600;")
     else:
         val.setStyleSheet(f"color: {FG_FAINT}; font-family: {MONO};")
     return lbl, val
@@ -37,9 +43,10 @@ class InterfaceConfigWorker(QThread):
     finished = Signal(object)  # InterfaceConfig
     cancelled = Signal()
 
-    def __init__(self, iface_name: str, parent=None):
+    def __init__(self, iface_name: str, gateway: str | None = None, parent=None):
         super().__init__(parent)
         self.iface_name = iface_name
+        self.gateway = gateway
         self._stop_event = threading.Event()
 
     def stop(self) -> None:
@@ -57,6 +64,14 @@ class InterfaceConfigWorker(QThread):
         if self._stop_event.is_set():
             self.cancelled.emit()
             return
+
+        effective_gw = self.gateway or (cfg.gateway if cfg else None)
+        link_checks = run_all_link_checks(gateway=effective_gw, stop_event=self._stop_event)
+        if self._stop_event.is_set():
+            self.cancelled.emit()
+            return
+
+        setattr(cfg, "link_checks", link_checks)
         self.finished.emit(cfg)
 
 
@@ -69,6 +84,10 @@ class LanInfoWidget(QWidget):
         self._mac_override = ""
         self.controller = controller  # set by main_window for DHCP observation
         self._cached_cfg: InterfaceConfig | None = None
+        self._cached_link_checks: dict[str, LinkCheckResult] = {}
+        self._discovered_gateway: str | None = None
+        if self.controller is not None and hasattr(self.controller, "upstream_discovery_finished"):
+            self.controller.upstream_discovery_finished.connect(self._on_upstream_path_updated)
         self._worker: InterfaceConfigWorker | None = None
         self._last_bg_completed: float = 0.0
         self._pending_refresh: bool = False
@@ -89,6 +108,28 @@ class LanInfoWidget(QWidget):
         self.grid.setHorizontalSpacing(24)
         self.grid.setVerticalSpacing(2)
         self.grid.setContentsMargins(2, 0, 2, 4)
+
+    def set_discovered_gateway(self, gw: str | None) -> None:
+        """Explicitly set discovered switch default gateway."""
+        if gw != self._discovered_gateway:
+            self._discovered_gateway = gw
+            self._request_bg_refresh(immediate=False)
+
+    def _on_upstream_path_updated(self, path: Any) -> None:
+        """Update discovered gateway from upstream discovery path."""
+        if not path or not getattr(path, "hops", None):
+            return
+        gw = None
+        for hop in path.hops:
+            if getattr(hop, "default_gateway", None):
+                gw = hop.default_gateway
+                break
+            if getattr(hop, "isp_gateway", None):
+                gw = hop.isp_gateway
+                break
+        if gw and gw != self._discovered_gateway:
+            self._discovered_gateway = gw
+            self._request_bg_refresh(immediate=False)
 
     def set_interface(self, iface_name: str, mac: str = "") -> None:
         if self._iface_name != iface_name or self._cached_cfg is None:
@@ -143,7 +184,15 @@ class LanInfoWidget(QWidget):
             self._pending_refresh = True
             return
 
-        self._worker = InterfaceConfigWorker(self._iface_name, parent=self)
+        gw = self._discovered_gateway
+        if not gw and self._cached_cfg and self._cached_cfg.gateway:
+            gw = self._cached_cfg.gateway
+        if not gw and self.controller and self.controller.network.get("gateways"):
+            gws = self.controller.network["gateways"]
+            if gws and isinstance(gws, list):
+                gw = gws[0]
+
+        self._worker = InterfaceConfigWorker(self._iface_name, gateway=gw, parent=self)
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.cancelled.connect(self._on_worker_cancelled)
         self._worker.start()
@@ -152,6 +201,8 @@ class LanInfoWidget(QWidget):
         self._last_bg_completed = time.monotonic()
         if cfg and cfg.name == self._iface_name:
             self._cached_cfg = cfg
+            if hasattr(cfg, "link_checks") and cfg.link_checks:
+                self._cached_link_checks = cfg.link_checks
             self._render_current()
             self.config_updated.emit(cfg)
 
@@ -179,7 +230,7 @@ class LanInfoWidget(QWidget):
             mac_display = f"{mac}  ({vendor})"
 
         dhcp_server = cfg.dhcp_server if cfg and cfg.dhcp_server else net.get("server_ip", "")
-        rows = [
+        rows: list[tuple[str, str] | tuple[str, str, str]] = [
             ("IP address", cfg.ip if cfg else ""),
             ("Subnet mask", cfg.netmask if cfg else ""),
             ("Default gateway", cfg.gateway if cfg else ""),
@@ -195,12 +246,33 @@ class LanInfoWidget(QWidget):
         if cfg and getattr(cfg, "unavailable_reason", ""):
             rows.append(("OS config", f"unavailable — {cfg.unavailable_reason}"))
 
+        # Extra reachability rows: DNS + internet, Internet, ISP
+        for row_name in ("DNS + internet", "Internet", "ISP"):
+            if self._cached_link_checks and row_name in self._cached_link_checks:
+                res = self._cached_link_checks[row_name]
+                if res.status == "reachable":
+                    col = OK
+                elif res.status == "unreachable":
+                    col = DANGER
+                elif res.status == "timeout":
+                    col = WARN
+                else:
+                    col = FG_FAINT
+                rows.append((row_name, res.display_text, col))
+            else:
+                rows.append((row_name, "", FG_FAINT))
+
         self._render(rows)
 
     def _render(self, rows) -> None:
         self._clear_grid()
-        for i, (label, value) in enumerate(rows):
-            lbl, val = _row(label, value)
+        for i, row in enumerate(rows):
+            if len(row) == 3:
+                label, value, color = row
+            else:
+                label, value = row
+                color = None
+            lbl, val = _row(label, value, color=color)
             self.grid.addWidget(lbl, i, 0)
             self.grid.addWidget(val, i, 1)
         self.grid.setColumnStretch(1, 1)
