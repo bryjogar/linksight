@@ -55,6 +55,7 @@ exe = EXE(
     upx=True,
     console=False,
     icon='linksight.ico',
+    uac_admin=True,
     disable_windowed_traceback=False,
 )
 

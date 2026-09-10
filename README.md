@@ -55,7 +55,7 @@ The workflow (`.github/workflows/linksight.yml`) runs the test suite, builds Win
 
 ## Requirements & Privileges
 
-- **Windows:** Npcap driver installed (available from [npcap.com](https://npcap.com/#download)). Administrator privileges are typically required for raw packet capture.
+- **Windows:** Npcap driver installed (available from [npcap.com](https://npcap.com/#download)). The app runs elevated (as Administrator) to perform raw packet capture.
 - **macOS:** Packet capture requires BPF device access permissions (admin privileges / terminal permission).
 - **Linux:** Requires `CAP_NET_RAW` capability (e.g. running via `sudo` or Docker `cap_add: [NET_RAW]`).
 
