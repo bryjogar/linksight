@@ -137,6 +137,20 @@ def _format_port_details_html(port: PortDiagnostics) -> str:
         spd_str, spd_col = _format_speed(port.link_speed_mbps)
         parts.append(f"<span style='color:{spd_col}; font-weight:600;'>{spd_str}</span>")
 
+    # 4. PoE
+    if port.poe_detection_status and port.poe_detection_status.lower() != "unknown":
+        p_st = port.poe_detection_status.lower()
+        if p_st == "deliveringpower":
+            p_col = OK
+            p_txt = f"PoE {port.poe_power_class}" if port.poe_power_class else "PoE delivering"
+        elif p_st in ("fault", "otherfault") or (port.poe_power_denied_counter and port.poe_power_denied_counter > 0):
+            p_col = DANGER
+            p_txt = "PoE fault"
+        else:
+            p_col = FG_DIM
+            p_txt = f"PoE {p_st}"
+        parts.append(f"<span style='color:{p_col}; font-weight:600;'>{p_txt}</span>")
+
     if not parts:
         return ""
     joined = " · ".join(parts)
@@ -346,6 +360,22 @@ class HopCardWidget(QFrame):
             lat_lbl = QLabel(f"Latency: {self.hop.response_time_ms:.1f} ms")
             lat_lbl.setStyleSheet(f"color: {FG_FAINT}; font-size: 11px; font-family: {MONO};")
             info_layout.addWidget(lat_lbl)
+        if self.hop.poe_supported is True:
+            if self.hop.poe_budget_watts is not None and self.hop.poe_consumption_watts is not None:
+                poe_msg = f"PoE: {self.hop.poe_consumption_watts} W draw / {self.hop.poe_budget_watts} W budget"
+            elif self.hop.poe_budget_watts is not None:
+                poe_msg = f"PoE Budget: {self.hop.poe_budget_watts} W"
+            elif self.hop.poe_consumption_watts is not None:
+                poe_msg = f"PoE Draw: {self.hop.poe_consumption_watts} W"
+            else:
+                poe_msg = "PoE: supported"
+            poe_lbl = QLabel(poe_msg)
+            poe_lbl.setStyleSheet(f"color: {OK}; font-size: 11px; font-family: {MONO};")
+            info_layout.addWidget(poe_lbl)
+        elif self.hop.poe_supported is False:
+            poe_lbl = QLabel("PoE: not supported")
+            poe_lbl.setStyleSheet(f"color: {FG_FAINT}; font-size: 11px; font-family: {MONO};")
+            info_layout.addWidget(poe_lbl)
         if info_layout.count() > 0:
             body_layout.addLayout(info_layout)
 
@@ -565,13 +595,14 @@ class HopCardWidget(QFrame):
             body_layout.addLayout(toggle_row)
 
             self.table = QTableWidget()
-            self.table.setColumnCount(6)
+            self.table.setColumnCount(7)
             self.table.setHorizontalHeaderLabels([
                 "PORT",
                 "PVID",
                 "ALLOWED VLANS",
                 "STP / STATUS",
                 "LINK SPEED",
+                "POE",
                 "CONNECTED NEIGHBOR",
             ])
             self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -666,7 +697,68 @@ class HopCardWidget(QFrame):
                     it_speed.setForeground(Qt.GlobalColor.green)
                 self.table.setItem(row_idx, 4, it_speed)
 
-                # 6. Neighbor
+                # 6. PoE Status
+                if self.hop.poe_supported is False:
+                    poe_text = "not reported"
+                    poe_color = Qt.GlobalColor.gray
+                    tip = "PoE not supported or not reported by device"
+                elif port.poe_detection_status:
+                    det = port.poe_detection_status
+                    det_low = det.lower()
+                    if det_low == "deliveringpower":
+                        poe_color = Qt.GlobalColor.green
+                        poe_text = f"delivering ({port.poe_power_class})" if port.poe_power_class else "delivering"
+                    elif det_low in ("fault", "otherfault") or (port.poe_power_denied_counter and port.poe_power_denied_counter > 0):
+                        poe_color = Qt.GlobalColor.red
+                        if port.poe_power_denied_counter and port.poe_power_denied_counter > 0 and det_low != "fault":
+                            poe_text = "power denied"
+                        else:
+                            poe_text = "fault"
+                    elif det_low == "searching":
+                        poe_color = Qt.GlobalColor.gray
+                        poe_text = "searching"
+                    elif det_low == "disabled":
+                        poe_color = Qt.GlobalColor.gray
+                        poe_text = "disabled"
+                    elif det_low == "test":
+                        poe_color = Qt.GlobalColor.yellow
+                        poe_text = "test"
+                    else:
+                        poe_color = Qt.GlobalColor.gray
+                        poe_text = det
+
+                    tip_items = []
+                    if port.poe_power_class:
+                        tip_items.append(f"Class: {port.poe_power_class}")
+                    if port.poe_priority:
+                        tip_items.append(f"Priority: {port.poe_priority}")
+                    if port.poe_admin_enable is not None:
+                        tip_items.append(f"Admin: {'enabled' if port.poe_admin_enable else 'disabled'}")
+                    errs = []
+                    if port.poe_power_denied_counter:
+                        errs.append(f"denied: {port.poe_power_denied_counter}")
+                    if port.poe_overload_counter:
+                        errs.append(f"overload: {port.poe_overload_counter}")
+                    if port.poe_short_counter:
+                        errs.append(f"short: {port.poe_short_counter}")
+                    if port.poe_invalid_signature_counter:
+                        errs.append(f"invalid sig: {port.poe_invalid_signature_counter}")
+                    if errs:
+                        tip_items.append(f"Errors: {', '.join(errs)}")
+                    tip = " · ".join(tip_items)
+                else:
+                    poe_text = "no PoE" if self.hop.poe_supported is True else "—"
+                    poe_color = Qt.GlobalColor.gray
+                    tip = "No PoE detected on this port"
+
+                it_poe = QTableWidgetItem(poe_text)
+                it_poe.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                it_poe.setForeground(poe_color)
+                if tip:
+                    it_poe.setToolTip(tip)
+                self.table.setItem(row_idx, 5, it_poe)
+
+                # 7. Neighbor
                 neigh_parts = []
                 p_n_name = _safe_display_text(port.neighbor_name) or _safe_display_text(port.neighbor_chassis)
                 if p_n_name:
@@ -680,7 +772,7 @@ class HopCardWidget(QFrame):
                 neigh_str = " ".join(neigh_parts) if neigh_parts else "—"
                 it_neigh = QTableWidgetItem(neigh_str)
                 it_neigh.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                self.table.setItem(row_idx, 5, it_neigh)
+                self.table.setItem(row_idx, 6, it_neigh)
 
                 # Row height compact
                 self.table.setRowHeight(row_idx, 24)

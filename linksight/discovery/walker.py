@@ -17,8 +17,18 @@ from ..text_util import (
     is_printable_text as _is_printable_text,
 )
 from .classifier import classify_device, is_edge_device
-from .models import Hop, PortDiagnostics, UpstreamPath, _prefer_ipv4, _prefer_onlink_ip
 from .arp_resolve import normalize_mac
+from .models import (
+    Hop,
+    PortDiagnostics,
+    UpstreamPath,
+    _prefer_ipv4,
+    _prefer_onlink_ip,
+    POE_DETECTION_STATUS_MAP,
+    POE_POWER_CLASS_MAP,
+    POE_POWER_PRIORITY_MAP,
+    POE_MAIN_OPER_STATUS_MAP,
+)
 from .snmp_client import (
     SnmpClient,
     SnmpError,
@@ -78,6 +88,22 @@ OID_CDP_CACHE_ADDRESS = "1.3.6.1.4.1.9.9.23.1.2.1.1.4"
 OID_CDP_CACHE_DEVICE_ID = "1.3.6.1.4.1.9.9.23.1.2.1.1.6"
 OID_CDP_CACHE_DEVICE_PORT = "1.3.6.1.4.1.9.9.23.1.2.1.1.7"
 OID_CDP_CACHE_PLATFORM = "1.3.6.1.4.1.9.9.23.1.2.1.1.8"
+
+# POWER-ETHERNET-MIB (RFC 3621)
+OID_PETH_PSE_PORT_ADMIN_ENABLE = "1.3.6.1.2.1.105.1.1.1.3"
+OID_PETH_PSE_PORT_POWER_PAIRS = "1.3.6.1.2.1.105.1.1.1.5"
+OID_PETH_PSE_PORT_DETECTION_STATUS = "1.3.6.1.2.1.105.1.1.1.6"
+OID_PETH_PSE_PORT_POWER_PRIORITY = "1.3.6.1.2.1.105.1.1.1.7"
+OID_PETH_PSE_PORT_TYPE = "1.3.6.1.2.1.105.1.1.1.9"
+OID_PETH_PSE_PORT_POWER_CLASS = "1.3.6.1.2.1.105.1.1.1.10"
+OID_PETH_PSE_PORT_INVALID_SIGNATURE_COUNTER = "1.3.6.1.2.1.105.1.1.1.11"
+OID_PETH_PSE_PORT_POWER_DENIED_COUNTER = "1.3.6.1.2.1.105.1.1.1.12"
+OID_PETH_PSE_PORT_OVERLOAD_COUNTER = "1.3.6.1.2.1.105.1.1.1.13"
+OID_PETH_PSE_PORT_SHORT_COUNTER = "1.3.6.1.2.1.105.1.1.1.14"
+
+OID_PETH_MAIN_PSE_POWER = "1.3.6.1.2.1.105.1.3.1.1.2"
+OID_PETH_MAIN_PSE_OPER_STATUS = "1.3.6.1.2.1.105.1.3.1.1.3"
+OID_PETH_MAIN_PSE_CONSUMPTION_POWER = "1.3.6.1.2.1.105.1.3.1.1.4"
 
 # IP Route Table (Default Gateway & Routes - RFC 1213 / RFC 2096)
 OID_IP_ROUTE_IF_INDEX_DEFAULT = "1.3.6.1.2.1.4.21.1.2.0.0.0.0"
@@ -150,6 +176,130 @@ def _parse_last_oid_index(oid_str: str) -> int | None:
     if parts and parts[-1].isdigit():
         return int(parts[-1])
     return None
+
+
+def _walk_poe(client: SnmpClient) -> dict[str, Any]:
+    """Walk POWER-ETHERNET-MIB (RFC 3621) PSE port and main tables."""
+    pse_found = False
+    ports_poe: dict[int, dict[str, Any]] = {}
+
+    try:
+        for oid, val in client.walk(OID_PETH_PSE_PORT_DETECTION_STATUS):
+            idx = _parse_last_oid_index(oid)
+            if idx is not None and isinstance(val, int) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                pse_found = True
+                status_str = POE_DETECTION_STATUS_MAP.get(val, "unknown")
+                ports_poe.setdefault(idx, {})["detection_status"] = status_str
+    except Exception:
+        pass
+
+    try:
+        for oid, val in client.walk(OID_PETH_PSE_PORT_POWER_CLASS):
+            idx = _parse_last_oid_index(oid)
+            if idx is not None and isinstance(val, int) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                pse_found = True
+                cls_str = POE_POWER_CLASS_MAP.get(val, f"class{val}")
+                ports_poe.setdefault(idx, {})["power_class"] = cls_str
+    except Exception:
+        pass
+
+    try:
+        for oid, val in client.walk(OID_PETH_PSE_PORT_POWER_PRIORITY):
+            idx = _parse_last_oid_index(oid)
+            if idx is not None and isinstance(val, int) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                pse_found = True
+                ports_poe.setdefault(idx, {})["priority"] = POE_POWER_PRIORITY_MAP.get(val, "unknown")
+    except Exception:
+        pass
+
+    try:
+        for oid, val in client.walk(OID_PETH_PSE_PORT_ADMIN_ENABLE):
+            idx = _parse_last_oid_index(oid)
+            if idx is not None and isinstance(val, int) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                pse_found = True
+                ports_poe.setdefault(idx, {})["admin_enable"] = (val == 1)
+    except Exception:
+        pass
+
+    try:
+        for oid, val in client.walk(OID_PETH_PSE_PORT_INVALID_SIGNATURE_COUNTER):
+            idx = _parse_last_oid_index(oid)
+            if idx is not None and isinstance(val, int) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                pse_found = True
+                ports_poe.setdefault(idx, {})["invalid_signature_counter"] = val
+    except Exception:
+        pass
+
+    try:
+        for oid, val in client.walk(OID_PETH_PSE_PORT_POWER_DENIED_COUNTER):
+            idx = _parse_last_oid_index(oid)
+            if idx is not None and isinstance(val, int) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                pse_found = True
+                ports_poe.setdefault(idx, {})["power_denied_counter"] = val
+    except Exception:
+        pass
+
+    try:
+        for oid, val in client.walk(OID_PETH_PSE_PORT_OVERLOAD_COUNTER):
+            idx = _parse_last_oid_index(oid)
+            if idx is not None and isinstance(val, int) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                pse_found = True
+                ports_poe.setdefault(idx, {})["overload_counter"] = val
+    except Exception:
+        pass
+
+    try:
+        for oid, val in client.walk(OID_PETH_PSE_PORT_SHORT_COUNTER):
+            idx = _parse_last_oid_index(oid)
+            if idx is not None and isinstance(val, int) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                pse_found = True
+                ports_poe.setdefault(idx, {})["short_counter"] = val
+    except Exception:
+        pass
+
+    main_budget: int | None = None
+    main_consumption: int | None = None
+    main_oper: str | None = None
+
+    try:
+        budgets: list[int] = []
+        for oid, val in client.walk(OID_PETH_MAIN_PSE_POWER):
+            if isinstance(val, int) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                pse_found = True
+                budgets.append(val)
+        if budgets:
+            main_budget = sum(budgets)
+    except Exception:
+        pass
+
+    try:
+        consumptions: list[int] = []
+        for oid, val in client.walk(OID_PETH_MAIN_PSE_CONSUMPTION_POWER):
+            if isinstance(val, int) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                pse_found = True
+                consumptions.append(val)
+        if consumptions:
+            main_consumption = sum(consumptions)
+    except Exception:
+        pass
+
+    try:
+        for oid, val in client.walk(OID_PETH_MAIN_PSE_OPER_STATUS):
+            if isinstance(val, int) and not isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                pse_found = True
+                main_oper = POE_MAIN_OPER_STATUS_MAP.get(val, "unknown")
+                break
+    except Exception:
+        pass
+
+    return {
+        "supported": pse_found,
+        "budget_watts": main_budget,
+        "consumption_watts": main_consumption,
+        "oper_status": main_oper,
+        "status": main_oper or ("available" if pse_found else "not available"),
+        "ports": ports_poe,
+    }
 
 
 def _is_stp_root_bridge(
@@ -524,6 +674,9 @@ class UpstreamWalker:
                         except Exception:
                             pass
 
+                    # PoE Information (POWER-ETHERNET-MIB - RFC 3621)
+                    edge_poe = _walk_poe(client)
+
                     # Previous hop info for LAN interface identification
                     prev_hop = hops[-1] if hops else None
                     prev_hop_ip = prev_hop.mgmt_ip if prev_hop else ""
@@ -568,26 +721,28 @@ class UpstreamWalker:
                         except Exception:
                             pass
 
-                    # 3. Subnet match check via ipAddrTable
+                    # 3. Subnet match via net-to-media / ifPhysAddress / interface IP
                     if lan_if_index is None and prev_hop_ip:
                         try:
                             import ipaddress
-                            ip_ifindex: dict[str, int] = {}
-                            ip_mask: dict[str, str] = {}
+                            prev_ip_obj = ipaddress.IPv4Address(prev_hop_ip)
+                            # net-to-media IP lookup
+                            if_addrs: dict[str, int] = {}
                             for oid, val in client.walk(OID_IP_ADDR_TABLE_IF_INDEX):
                                 parts = oid.strip(".").split(".")
-                                if len(parts) >= 4 and isinstance(val, int):
-                                    ip_str = ".".join(parts[-4:])
-                                    ip_ifindex[ip_str] = val
+                                if len(parts) >= 4:
+                                    cand_ip = ".".join(parts[-4:])
+                                    if isinstance(val, int):
+                                        if_addrs[cand_ip] = val
+                            ip_mask: dict[str, str] = {}
                             for oid, val in client.walk(OID_IP_ADDR_TABLE_NET_MASK):
                                 parts = oid.strip(".").split(".")
                                 if len(parts) >= 4:
-                                    mask_str = _decode_ip_address(val) or _decode_text(val) or "255.255.255.0"
-                                    ip_str = ".".join(parts[-4:])
-                                    ip_mask[ip_str] = mask_str
-
-                            prev_ip_obj = ipaddress.IPv4Address(prev_hop_ip)
-                            for if_ip, if_idx in ip_ifindex.items():
+                                    cand_ip = ".".join(parts[-4:])
+                                    mask_str = _decode_ip_address(val)
+                                    if mask_str:
+                                        ip_mask[cand_ip] = mask_str
+                            for if_ip, if_idx in if_addrs.items():
                                 mask = ip_mask.get(if_ip, "255.255.255.0")
                                 try:
                                     net = ipaddress.IPv4Network(f"{if_ip}/{mask}", strict=False)
@@ -612,7 +767,7 @@ class UpstreamWalker:
                                     break
 
                     # Build edge port diagnostics list
-                    all_indices = sorted(set(if_names.keys()) | set(if_descrs.keys()) | set(if_speeds.keys()) | set(if_oper.keys()) | set(if_admin.keys()))
+                    all_indices = sorted(set(if_names.keys()) | set(if_descrs.keys()) | set(if_speeds.keys()) | set(if_oper.keys()) | set(if_admin.keys()) | set(edge_poe["ports"].keys()))
                     if default_route_if_index is not None and default_route_if_index not in all_indices:
                         all_indices.append(default_route_if_index)
                         all_indices.sort()
@@ -646,6 +801,8 @@ class UpstreamWalker:
                             if prev_hop.uplink_port:
                                 n_port = _decode_port_id(prev_hop.uplink_port.port_name) or ""
 
+                        p_poe = edge_poe["ports"].get(idx, {})
+
                         diag = PortDiagnostics(
                             port_id=idx,
                             port_name=p_name,
@@ -658,6 +815,14 @@ class UpstreamWalker:
                             neighbor_name=n_name,
                             neighbor_ip=n_ip,
                             neighbor_port=n_port,
+                            poe_detection_status=p_poe.get("detection_status"),
+                            poe_power_class=p_poe.get("power_class"),
+                            poe_priority=p_poe.get("priority"),
+                            poe_admin_enable=p_poe.get("admin_enable"),
+                            poe_invalid_signature_counter=p_poe.get("invalid_signature_counter"),
+                            poe_power_denied_counter=p_poe.get("power_denied_counter"),
+                            poe_overload_counter=p_poe.get("overload_counter"),
+                            poe_short_counter=p_poe.get("short_counter"),
                         )
                         ports_list.append(diag)
                         if is_wan:
@@ -782,6 +947,11 @@ class UpstreamWalker:
                         isp_gateway=isp_gateway,
                         wan_interface=wan_diag,
                         lan_interface=lan_diag,
+                        poe_budget_watts=edge_poe["budget_watts"],
+                        poe_consumption_watts=edge_poe["consumption_watts"],
+                        poe_oper_status=edge_poe["oper_status"],
+                        poe_supported=edge_poe["supported"],
+                        poe_status=edge_poe["status"],
                     )
                     hops.append(hop)
                     edge_type = device_type
@@ -1058,11 +1228,16 @@ class UpstreamWalker:
                 except Exception:
                     pass
 
-                # 7. DIRECTION RULE & STP Root Check
+                # 7. PoE Information (POWER-ETHERNET-MIB - RFC 3621)
+                poe_info = _walk_poe(client)
+
+                # 8. DIRECTION RULE & STP Root Check
                 is_root = _is_stp_root_bridge(bridge_addr, stp_root_bridge, stp_root_port)
 
                 # Assemble port diagnostics
                 ports_list: list[PortDiagnostics] = []
+                inverse_ifindex_map = {if_idx: p_num for p_num, if_idx in port_ifindex_map.items()}
+
                 all_port_ids = (
                     set(port_pvids.keys())
                     | set(stp_port_states.keys())
@@ -1071,14 +1246,15 @@ class UpstreamWalker:
                     | set(port_untagged_vlans.keys())
                     | set(port_ifindex_map.keys())
                 )
+                if poe_info["ports"]:
+                    poe_p_nums = {inverse_ifindex_map.get(idx, idx) for idx in poe_info["ports"].keys()}
+                    all_port_ids |= poe_p_nums
                 if not port_ifindex_map:
                     all_port_ids |= set(if_names.keys()) | set(if_speeds.keys())
                 elif not all_port_ids:
                     all_port_ids = set(if_names.keys()) | set(if_speeds.keys())
                 if stp_root_port and stp_root_port > 0:
                     all_port_ids.add(stp_root_port)
-
-                inverse_ifindex_map = {if_idx: p_num for p_num, if_idx in port_ifindex_map.items()}
 
                 for p_num in sorted(all_port_ids):
                     if_idx = port_ifindex_map.get(p_num, p_num)
@@ -1107,6 +1283,13 @@ class UpstreamWalker:
                         port_neighbors.get(p_num)
                         or port_neighbors.get(if_idx)
                         or (port_neighbors.get(inverse_ifindex_map[p_num]) if p_num in inverse_ifindex_map else {})
+                        or {}
+                    )
+
+                    p_poe = (
+                        poe_info["ports"].get(if_idx)
+                        or poe_info["ports"].get(p_num)
+                        or (poe_info["ports"].get(inverse_ifindex_map[p_num]) if p_num in inverse_ifindex_map else {})
                         or {}
                     )
 
@@ -1144,6 +1327,14 @@ class UpstreamWalker:
                         neighbor_chassis=neigh_chassis,
                         is_uplink=is_this_root_port,
                         platform=neigh_platform,
+                        poe_detection_status=p_poe.get("detection_status"),
+                        poe_power_class=p_poe.get("power_class"),
+                        poe_priority=p_poe.get("priority"),
+                        poe_admin_enable=p_poe.get("admin_enable"),
+                        poe_invalid_signature_counter=p_poe.get("invalid_signature_counter"),
+                        poe_power_denied_counter=p_poe.get("power_denied_counter"),
+                        poe_overload_counter=p_poe.get("overload_counter"),
+                        poe_short_counter=p_poe.get("short_counter"),
                     )
                     ports_list.append(diag)
 
@@ -1481,6 +1672,11 @@ class UpstreamWalker:
                         )
                     ) else [],
                     response_time_ms=(time.perf_counter() - t0) * 1000,
+                    poe_budget_watts=poe_info["budget_watts"],
+                    poe_consumption_watts=poe_info["consumption_watts"],
+                    poe_oper_status=poe_info["oper_status"],
+                    poe_supported=poe_info["supported"],
+                    poe_status=poe_info["status"],
                 )
                 hops.append(hop)
 

@@ -60,6 +60,36 @@ def _prefer_onlink_ip(ips: list[str], context_ip: str) -> str:
     return v4[0]
 
 
+POE_DETECTION_STATUS_MAP = {
+    1: "disabled",
+    2: "searching",
+    3: "deliveringPower",
+    4: "fault",
+    5: "test",
+    6: "otherFault",
+}
+
+POE_POWER_CLASS_MAP = {
+    1: "class0",
+    2: "class1",
+    3: "class2",
+    4: "class3",
+    5: "class4",
+}
+
+POE_POWER_PRIORITY_MAP = {
+    1: "critical",
+    2: "high",
+    3: "low",
+}
+
+POE_MAIN_OPER_STATUS_MAP = {
+    1: "on",
+    2: "off",
+    3: "faulty",
+}
+
+
 @dataclass
 class PortDiagnostics:
     """Per-port diagnostic data captured during discovery."""
@@ -83,6 +113,14 @@ class PortDiagnostics:
     oper_status: str = "unknown"  # "up", "down", "testing", "unknown", "dormant", "notPresent", "lowerLayerDown"
     admin_status: str = "unknown"  # "up", "down", "testing"
     platform: str = ""
+    poe_detection_status: str | None = None
+    poe_power_class: str | None = None
+    poe_priority: str | None = None
+    poe_admin_enable: bool | None = None
+    poe_invalid_signature_counter: int | None = None
+    poe_power_denied_counter: int | None = None
+    poe_overload_counter: int | None = None
+    poe_short_counter: int | None = None
 
     def __post_init__(self) -> None:
         # Normalize port_id (bytes/reprs can leak into "Port b'...'")
@@ -225,6 +263,74 @@ class PortDiagnostics:
             elif not isinstance(val, str):
                 setattr(self, field_name, "unknown")
 
+        # Normalize PoE fields
+        if self.poe_detection_status is not None:
+            if isinstance(self.poe_detection_status, (bytes, bytearray)):
+                dec = decode_text(self.poe_detection_status)
+                self.poe_detection_status = dec if dec else None
+            elif isinstance(self.poe_detection_status, int):
+                self.poe_detection_status = POE_DETECTION_STATUS_MAP.get(self.poe_detection_status, "unknown")
+            elif isinstance(self.poe_detection_status, str):
+                s = self.poe_detection_status.strip()
+                self.poe_detection_status = s if s else None
+            else:
+                self.poe_detection_status = None
+
+        if self.poe_power_class is not None:
+            if isinstance(self.poe_power_class, (bytes, bytearray)):
+                dec = decode_text(self.poe_power_class)
+                self.poe_power_class = dec if dec else None
+            elif isinstance(self.poe_power_class, int):
+                if self.poe_power_class in POE_POWER_CLASS_MAP:
+                    self.poe_power_class = POE_POWER_CLASS_MAP[self.poe_power_class]
+                elif 0 <= self.poe_power_class <= 4:
+                    self.poe_power_class = f"class{self.poe_power_class}"
+                else:
+                    self.poe_power_class = f"class{self.poe_power_class}"
+            elif isinstance(self.poe_power_class, str):
+                s = self.poe_power_class.strip()
+                self.poe_power_class = s if s else None
+            else:
+                self.poe_power_class = None
+
+        if self.poe_priority is not None:
+            if isinstance(self.poe_priority, (bytes, bytearray)):
+                dec = decode_text(self.poe_priority)
+                self.poe_priority = dec if dec else None
+            elif isinstance(self.poe_priority, int):
+                self.poe_priority = POE_POWER_PRIORITY_MAP.get(self.poe_priority, "unknown")
+            elif isinstance(self.poe_priority, str):
+                s = self.poe_priority.strip()
+                self.poe_priority = s if s else None
+            else:
+                self.poe_priority = None
+
+        if self.poe_admin_enable is not None:
+            if isinstance(self.poe_admin_enable, int):
+                self.poe_admin_enable = (self.poe_admin_enable == 1)
+            elif not isinstance(self.poe_admin_enable, bool):
+                self.poe_admin_enable = None
+
+        for cntr in (
+            "poe_invalid_signature_counter",
+            "poe_power_denied_counter",
+            "poe_overload_counter",
+            "poe_short_counter",
+        ):
+            v = getattr(self, cntr)
+            if v is not None:
+                if isinstance(v, (bytes, bytearray, str)):
+                    try:
+                        setattr(self, cntr, int(v))
+                    except (ValueError, TypeError):
+                        setattr(self, cntr, None)
+                elif not isinstance(v, int):
+                    setattr(self, cntr, None)
+
+    @property
+    def poe_status(self) -> str | None:
+        return self.poe_detection_status
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -278,6 +384,11 @@ class Hop:
     wan_interface: PortDiagnostics | None = None
     lan_interface: PortDiagnostics | None = None
     ambiguous_candidates: list[PortDiagnostics] = field(default_factory=list)
+    poe_budget_watts: float | int | None = None
+    poe_consumption_watts: float | int | None = None
+    poe_oper_status: str | None = None
+    poe_supported: bool | None = None
+    poe_status: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.hostname, (bytes, bytearray)):
@@ -315,6 +426,36 @@ class Hop:
             self.default_gateway = decode_ip_address(self.default_gateway)
         if self.isp_gateway:
             self.isp_gateway = decode_ip_address(self.isp_gateway)
+
+        if self.poe_budget_watts is not None:
+            try:
+                self.poe_budget_watts = int(self.poe_budget_watts)
+            except (ValueError, TypeError):
+                self.poe_budget_watts = None
+
+        if self.poe_consumption_watts is not None:
+            try:
+                self.poe_consumption_watts = int(self.poe_consumption_watts)
+            except (ValueError, TypeError):
+                self.poe_consumption_watts = None
+
+        if self.poe_status is None:
+            if self.poe_supported is False or (self.poe_supported is None and self.poe_budget_watts is None and self.poe_consumption_watts is None):
+                self.poe_status = "not available"
+            elif self.poe_supported is True:
+                self.poe_status = self.poe_oper_status or "available"
+            else:
+                self.poe_status = "not available"
+
+    @property
+    def poe_summary(self) -> str:
+        if not self.poe_supported or (self.poe_budget_watts is None and self.poe_consumption_watts is None):
+            return "not available"
+        if self.poe_consumption_watts is not None and self.poe_budget_watts is not None:
+            return f"{self.poe_consumption_watts} W / {self.poe_budget_watts} W"
+        if self.poe_budget_watts is not None:
+            return f"{self.poe_budget_watts} W"
+        return "not available"
 
     def to_dict(self) -> dict:
         return asdict(self)

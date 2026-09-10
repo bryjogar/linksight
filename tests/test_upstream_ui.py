@@ -1233,3 +1233,65 @@ def test_main_window_stalled_hop_auto_prompt(monkeypatch):
     finally:
         window.close()
         controller.close()
+
+
+def test_hop_card_widget_poe_rendering():
+    """Verify HopCardWidget renders PoE budget/draw and per-port table column with appropriate colors."""
+    from PySide6.QtCore import Qt
+    from linksight.discovery.models import Hop, PortDiagnostics
+    from linksight.ui.upstream_widget import HopCardWidget
+
+    app = QApplication.instance() or QApplication([])
+
+    # 1. Switch with PoE supported
+    p1 = PortDiagnostics(port_id=1, port_name="Gi1/0/1", poe_detection_status="deliveringPower", poe_power_class="class4")
+    p2 = PortDiagnostics(port_id=2, port_name="Gi1/0/2", poe_detection_status="fault", poe_short_counter=1)
+    p3 = PortDiagnostics(port_id=3, port_name="Gi1/0/3", poe_detection_status="searching")
+    p4 = PortDiagnostics(port_id=4, port_name="Gi1/0/4", poe_detection_status=None)
+
+    hop_poe = Hop(
+        hop_index=1,
+        hostname="Switch-PoE",
+        mgmt_ip="10.0.0.1",
+        poe_supported=True,
+        poe_budget_watts=370,
+        poe_consumption_watts=65,
+        poe_oper_status="on",
+        ports=[p1, p2, p3, p4],
+    )
+
+    card = HopCardWidget(hop_poe)
+    assert card.table.columnCount() == 7
+    header_labels = [card.table.horizontalHeaderItem(c).text() for c in range(7)]
+    assert header_labels[5] == "POE"
+    assert header_labels[6] == "CONNECTED NEIGHBOR"
+
+    # Row 0: delivering (class4) -> green
+    assert card.table.item(0, 5).text() == "delivering (class4)"
+    assert card.table.item(0, 5).foreground().color() == Qt.GlobalColor.green
+
+    # Row 1: fault -> red
+    assert card.table.item(1, 5).text() == "fault"
+    assert card.table.item(1, 5).foreground().color() == Qt.GlobalColor.red
+
+    # Row 2: searching -> gray
+    assert card.table.item(2, 5).text() == "searching"
+    assert card.table.item(2, 5).foreground().color() == Qt.GlobalColor.gray
+
+    # Row 3: no PoE -> gray
+    assert card.table.item(3, 5).text() == "no PoE"
+
+    # 2. Switch with PoE unsupported
+    p_non = PortDiagnostics(port_id=1, port_name="Gi1/0/1", poe_detection_status=None)
+    hop_non_poe = Hop(
+        hop_index=1,
+        hostname="Switch-NonPoE",
+        mgmt_ip="10.0.0.2",
+        poe_supported=False,
+        ports=[p_non],
+    )
+
+    card_non = HopCardWidget(hop_non_poe)
+    assert card_non.table.item(0, 5).text() == "not reported"
+    assert card_non.table.item(0, 5).foreground().color() == Qt.GlobalColor.gray
+
