@@ -68,6 +68,19 @@ def _safe_run(
             print(f"Command '{cmd_name}' failed with exit code {result.returncode}")
             return None
         return result
+    except subprocess.TimeoutExpired as exc:
+        if not check_returncode:
+            stdout_str = exc.stdout.decode("utf-8", "ignore") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            stderr_str = exc.stderr.decode("utf-8", "ignore") if isinstance(exc.stderr, bytes) else (exc.stderr or "timed out")
+            return subprocess.CompletedProcess(
+                cmd,
+                returncode=124,
+                stdout=stdout_str,
+                stderr=stderr_str,
+            )
+        cmd_name = cmd[0] if cmd else "command"
+        print(f"Command '{cmd_name}' timed out")
+        return None
     except Exception as exc:
         cmd_name = cmd[0] if cmd else "command"
         print(f"Command '{cmd_name}' failed: {exc}")

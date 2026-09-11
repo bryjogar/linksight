@@ -57,6 +57,17 @@ from linksight.discovery.walker import (
     OID_CDP_CACHE_DEVICE_PORT,
     OID_CDP_CACHE_ADDRESS,
     OID_CDP_CACHE_PLATFORM,
+    OID_PETH_PSE_PORT_DETECTION_STATUS,
+    OID_PETH_PSE_PORT_POWER_CLASS,
+    OID_PETH_PSE_PORT_POWER_PRIORITY,
+    OID_PETH_PSE_PORT_ADMIN_ENABLE,
+    OID_PETH_PSE_PORT_INVALID_SIGNATURE_COUNTER,
+    OID_PETH_PSE_PORT_POWER_DENIED_COUNTER,
+    OID_PETH_PSE_PORT_OVERLOAD_COUNTER,
+    OID_PETH_PSE_PORT_SHORT_COUNTER,
+    OID_PETH_MAIN_PSE_POWER,
+    OID_PETH_MAIN_PSE_OPER_STATUS,
+    OID_PETH_MAIN_PSE_CONSUMPTION_POWER,
 )
 
 
@@ -2866,3 +2877,135 @@ def test_walker_edge_interfaces_mapped_to_core_ports_via_fdb():
     for nm in ("X0", "X2", "X3"):
         assert ports_by_name[nm].neighbor_name == "Core-MDF"
         assert ports_by_name[nm].is_downlink is True
+
+
+def test_walker_poe_port_delivering_power():
+    """Verify walker extracts PoE delivering power status, class, and switch budget/draw."""
+    sw_ip = "10.0.0.10"
+    sw_mib = {
+        OID_SYS_DESCR: "Cisco Catalyst 2960-X",
+        OID_SYS_NAME: "PoE-SW1",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000000000001"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("000000000001"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.1": 1,
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.2": 2,
+        f"{OID_DOT1D_STP_PORT_STATE}.1": 5,
+        f"{OID_DOT1D_STP_PORT_STATE}.2": 5,
+        f"{OID_IF_NAME}.1": "Gi1/0/1",
+        f"{OID_IF_NAME}.2": "Gi1/0/2",
+        f"{OID_IF_HIGH_SPEED}.1": 1000,
+        f"{OID_IF_HIGH_SPEED}.2": 1000,
+        # RFC 3621 main PSE table
+        f"{OID_PETH_MAIN_PSE_POWER}.1": 370,
+        f"{OID_PETH_MAIN_PSE_CONSUMPTION_POWER}.1": 65,
+        f"{OID_PETH_MAIN_PSE_OPER_STATUS}.1": 1,  # on
+        # RFC 3621 port table: port 1 delivering power
+        f"{OID_PETH_PSE_PORT_ADMIN_ENABLE}.1.1": 1,  # enabled
+        f"{OID_PETH_PSE_PORT_DETECTION_STATUS}.1.1": 3,  # deliveringPower
+        f"{OID_PETH_PSE_PORT_POWER_CLASS}.1.1": 5,  # class4
+        f"{OID_PETH_PSE_PORT_POWER_PRIORITY}.1.1": 1,  # critical
+    }
+    factory = make_mock_client_factory({sw_ip: sw_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    assert result.success is True
+    assert len(result.hops) == 1
+    hop = result.hops[0]
+    assert hop.poe_supported is True
+    assert hop.poe_budget_watts == 370
+    assert hop.poe_consumption_watts == 65
+    assert hop.poe_oper_status == "on"
+    assert hop.poe_summary == "65 W / 370 W"
+
+    ports = {p.port_id: p for p in hop.ports}
+    p1 = ports[1]
+    assert p1.poe_admin_enable is True
+    assert p1.poe_detection_status == "deliveringPower"
+    assert p1.poe_power_class == "class4"
+    assert p1.poe_priority == "critical"
+    assert p1.poe_status == "deliveringPower"
+
+
+def test_walker_poe_port_fault_or_power_denied():
+    """Verify walker extracts fault detection status and power denied error counters."""
+    sw_ip = "10.0.0.11"
+    sw_mib = {
+        OID_SYS_DESCR: "Aruba 2930F",
+        OID_SYS_NAME: "PoE-SW2",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000000000002"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("000000000002"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.1": 1,
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.2": 2,
+        f"{OID_DOT1D_STP_PORT_STATE}.1": 5,
+        f"{OID_DOT1D_STP_PORT_STATE}.2": 5,
+        f"{OID_IF_NAME}.1": "1",
+        f"{OID_IF_NAME}.2": "2",
+        f"{OID_IF_HIGH_SPEED}.1": 1000,
+        f"{OID_IF_HIGH_SPEED}.2": 1000,
+        # RFC 3621 main PSE table
+        f"{OID_PETH_MAIN_PSE_POWER}.1": 150,
+        f"{OID_PETH_MAIN_PSE_CONSUMPTION_POWER}.1": 150,
+        f"{OID_PETH_MAIN_PSE_OPER_STATUS}.1": 1,
+        # Port 1: fault status with short counter
+        f"{OID_PETH_PSE_PORT_ADMIN_ENABLE}.1.1": 1,
+        f"{OID_PETH_PSE_PORT_DETECTION_STATUS}.1.1": 4,  # fault
+        f"{OID_PETH_PSE_PORT_SHORT_COUNTER}.1.1": 2,
+        # Port 2: searching with power denied counter
+        f"{OID_PETH_PSE_PORT_ADMIN_ENABLE}.1.2": 1,
+        f"{OID_PETH_PSE_PORT_DETECTION_STATUS}.1.2": 2,  # searching
+        f"{OID_PETH_PSE_PORT_POWER_DENIED_COUNTER}.1.2": 5,
+    }
+    factory = make_mock_client_factory({sw_ip: sw_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    assert result.success is True
+    hop = result.hops[0]
+    assert hop.poe_supported is True
+
+    ports = {p.port_id: p for p in hop.ports}
+    p1 = ports[1]
+    assert p1.poe_detection_status == "fault"
+    assert p1.poe_short_counter == 2
+    assert p1.poe_status == "fault"
+
+    p2 = ports[2]
+    assert p2.poe_detection_status == "searching"
+    assert p2.poe_power_denied_counter == 5
+
+
+def test_walker_poe_pse_table_absent_asserts_not_available_not_zeros():
+    """Verify that absent PSE tables report 'not available' and None, never zeros."""
+    sw_ip = "10.0.0.12"
+    sw_mib = {
+        OID_SYS_DESCR: "Dell PowerConnect 2824 (no PoE)",
+        OID_SYS_NAME: "NonPoE-SW",
+        OID_DOT1D_BASE_BRIDGE_ADDRESS: bytes.fromhex("000000000003"),
+        OID_DOT1D_STP_ROOT_BRIDGE: bytes.fromhex("000000000003"),
+        OID_DOT1D_STP_ROOT_PORT: 0,
+        f"{OID_DOT1D_BASE_PORT_IFINDEX}.1": 1,
+        f"{OID_DOT1D_STP_PORT_STATE}.1": 5,
+        f"{OID_IF_NAME}.1": "1",
+        f"{OID_IF_HIGH_SPEED}.1": 1000,
+    }
+    factory = make_mock_client_factory({sw_ip: sw_mib})
+    walker = UpstreamWalker(community="public", client_factory=factory)
+    result = walker.walk(start_ip=sw_ip)
+
+    assert result.success is True
+    hop = result.hops[0]
+    assert hop.poe_supported is False
+    assert hop.poe_budget_watts is None
+    assert hop.poe_budget_watts != 0
+    assert hop.poe_consumption_watts is None
+    assert hop.poe_consumption_watts != 0
+    assert hop.poe_status == "not available"
+    assert hop.poe_summary == "not available"
+
+    p1 = hop.ports[0]
+    assert p1.poe_detection_status is None
+    assert p1.poe_status is None
+
