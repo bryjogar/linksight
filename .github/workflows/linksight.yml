@@ -46,7 +46,7 @@ jobs:
           path: |
             dist/LinkSight-windows.zip
             dist/LinkSight-Portable.exe
-          retention-days: 14
+          retention-days: 1
 
   build-macos:
     name: macOS build
@@ -66,7 +66,7 @@ jobs:
         with:
           name: linksight-macos
           path: dist/LinkSight-mac.zip
-          retention-days: 14
+          retention-days: 1
 
   release:
     name: Publish release
